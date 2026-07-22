@@ -1,358 +1,69 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
-  Copy,
   Download,
   FolderOpen,
-  Grid3X3,
-  ImagePlus,
-  Pencil,
-  MousePointer2,
-  Plus,
-  ScanLine,
-  Trash2,
-  Upload,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
 import { assignCharacters, createCharacterMap, detectGlyphsWithMetrics, makeGridGlyphs } from "./lib/glyphs";
 import { findDuplicateCharacters, parseFnt, serializeFnt } from "./lib/fnt";
-import { layoutBitmapText } from "./lib/preview";
 import { createGlyphHistory, glyphHistoryReducer } from "./lib/glyphHistory";
-import { adjustBoundedValue, evaluateArithmeticExpression, horizontalDragSteps } from "./lib/arithmetic";
 import { applyRecognitionResults, createTemplateRecognizer, type Recognizer } from "./lib/recognizer";
+import { runRecognition } from "./lib/runRecognition";
 import { decodeAtlas, isAtlasFile } from "./lib/atlas";
+import { SaveQueue } from "./lib/saveQueue";
+import { download, downloadText } from "./lib/download";
 import {
-  deleteProject,
-  getProject,
-  listProjects,
-  putProject,
+  projectStore,
   summarizeProject,
   type ProjectDocument,
   type ProjectSummary,
 } from "./lib/projectStore";
-import type { AtlasImage, DetectionSettings, Glyph, GridSettings, PaneSizes } from "./types";
+import {
+  defaultWork,
+  patchWork,
+  projectFromFnt,
+  projectFromImage,
+  updateProject,
+  workFrom,
+} from "./lib/project";
+import type { AtlasImage, Glyph } from "./types";
+import { Preview } from "./components/Preview";
+import { Projects } from "./components/Projects";
+import { AtlasPanel } from "./components/AtlasPanel";
+import { AtlasView, type Pixel } from "./components/AtlasView";
+import { EditPanel } from "./components/EditPanel";
+import { PANE_LIMITS, usePanes } from "./hooks/usePanes";
+import { useHistoryKeys } from "./hooks/useHistoryKeys";
 
-const DEFAULT_CHARSET =
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,!?-+*/:;()[]{}<>@#$%&_=\\\"'`~|^";
 const CONFIRM_DESTRUCTIVE_SHAPE_DETECTION = true;
-const DEFAULT_SETTINGS: DetectionSettings = { alphaThreshold: 16, padding: 1, minArea: 2, advanceAdjustment: 0 };
-const DEFAULT_GRID: GridSettings = { width: 16, height: 16, offsetX: 0, offsetY: 0, gapX: 0, gapY: 0 };
-const DEFAULT_PANE_SIZES: PaneSizes = { left: 280, right: 288, preview: 220 };
-const DEFAULT_PREVIEW_TEXT = "The quick brown fox\n0123456789";
-
-type NumberFieldProps = {
-  label: string;
-  value: number;
-  min?: number;
-  max?: number;
-  onChange: (value: number) => void;
-  historyManaged?: boolean;
-  onInteractionStart?: () => void;
-  onInteractionEnd?: () => void;
-};
-
-type BitmapPreviewProps = {
-  atlas: AtlasImage | null;
-  glyphs: Glyph[];
-  lineHeight: number;
-  text: string;
-  zoom: number;
-  onZoomChange: (zoom: number) => void;
-};
-
-type PaneResizeMode = "left" | "right" | "preview";
-
-const PANE_LIMITS = {
-  left: 220,
-  right: 240,
-  preview: 160,
-  canvas: 380,
-  upperWorkspace: 280,
-  splitter: 6,
-};
-
-function BitmapPreview({ atlas, glyphs, lineHeight, text, zoom, onZoomChange }: BitmapPreviewProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const preview = useMemo(() => layoutBitmapText(glyphs, lineHeight, text), [glyphs, lineHeight, text]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !atlas) return;
-
-    const context = canvas.getContext("2d");
-    if (!context) return;
-
-    context.imageSmoothingEnabled = false;
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.fillStyle = "#11110e";
-    context.fillRect(0, 0, canvas.width, canvas.height);
-
-    preview.lineTops.forEach((lineTop) => {
-      const baseline = lineTop + preview.lineHeight;
-
-      context.setLineDash([2, 2]);
-      context.strokeStyle = "rgba(67, 216, 223, .45)";
-      context.beginPath();
-      context.moveTo(0, lineTop + 0.5);
-      context.lineTo(canvas.width, lineTop + 0.5);
-      context.stroke();
-
-      context.setLineDash([]);
-      context.strokeStyle = "rgba(249, 218, 42, .65)";
-      context.beginPath();
-      context.moveTo(0, baseline - 0.5);
-      context.lineTo(canvas.width, baseline - 0.5);
-      context.stroke();
-
-    });
-
-    for (const { glyph, x, y } of preview.placements) {
-      context.drawImage(
-        atlas.image,
-        glyph.x,
-        glyph.y,
-        glyph.width,
-        glyph.height,
-        x,
-        y,
-        glyph.width,
-        glyph.height,
-      );
-    }
-  }, [atlas, preview]);
-
-  useEffect(() => {
-    const scroll = scrollRef.current;
-    if (!scroll) return;
-    const handleWheel = (event: WheelEvent) => {
-      if (!event.ctrlKey) return;
-      event.preventDefault();
-      onZoomChange(Math.max(1, Math.min(8, zoom + (event.deltaY < 0 ? 1 : -1))));
-    };
-    scroll.addEventListener("wheel", handleWheel, { passive: false });
-    return () => scroll.removeEventListener("wheel", handleWheel);
-  }, [onZoomChange, zoom]);
-
-  if (!atlas) return <p className="muted">Load atlas to render preview.</p>;
-
-  return (
-    <div ref={scrollRef} className="bitmap-preview-scroll">
-      <canvas
-        ref={canvasRef}
-        className="bitmap-preview-canvas"
-        width={preview.width}
-        height={preview.height}
-        style={{ width: preview.width * zoom, height: preview.height * zoom }}
-        aria-label={`Live bitmap preview at ${zoom} times zoom: ${text}`}
-        role="img"
-      />
-    </div>
-  );
-}
-
-function NumberField({
-  label,
-  value,
-  min,
-  max,
-  onChange,
-  historyManaged = false,
-  onInteractionStart,
-  onInteractionEnd,
-}: NumberFieldProps) {
-  const [draft, setDraft] = useState(String(value));
-  const [scrubbing, setScrubbing] = useState(false);
-  const draftRef = useRef(draft);
-  const valueRef = useRef(value);
-  const wheelEndTimerRef = useRef<number | null>(null);
-  const interactionActiveRef = useRef(false);
-  const interactionCallbacksRef = useRef({ onInteractionStart, onInteractionEnd });
-  const dragRef = useRef<{
-    pointerId: number;
-    startX: number;
-    startValue: number;
-    steps: number;
-    active: boolean;
-  } | null>(null);
-
-  interactionCallbacksRef.current = { onInteractionStart, onInteractionEnd };
-
-  useEffect(() => {
-    const nextDraft = String(value);
-    valueRef.current = value;
-    draftRef.current = nextDraft;
-    setDraft(nextDraft);
-  }, [value]);
-
-  useEffect(() => () => {
-    if (wheelEndTimerRef.current !== null) window.clearTimeout(wheelEndTimerRef.current);
-    if (interactionActiveRef.current) interactionCallbacksRef.current.onInteractionEnd?.();
-  }, []);
-
-  const startInteraction = () => {
-    if (interactionActiveRef.current) return;
-    interactionActiveRef.current = true;
-    interactionCallbacksRef.current.onInteractionStart?.();
-  };
-
-  const endInteraction = () => {
-    if (!interactionActiveRef.current) return;
-    interactionActiveRef.current = false;
-    interactionCallbacksRef.current.onInteractionEnd?.();
-  };
-
-  const stepValue = (delta: number) => {
-    const parsed = evaluateArithmeticExpression(draftRef.current);
-    const current = parsed ?? valueRef.current;
-    const next = adjustBoundedValue(current, delta, min, max);
-    if (next === valueRef.current && draftRef.current === String(next)) return;
-    draftRef.current = String(next);
-    valueRef.current = next;
-    setDraft(String(next));
-    onChange(next);
-  };
-
-  const collapseSelection = (input: HTMLInputElement) => {
-    const caret = input.value.length;
-    input.setSelectionRange(caret, caret);
-    window.getSelection()?.removeAllRanges();
-  };
-
-  const commit = (expression: string) => {
-    const result = evaluateArithmeticExpression(expression);
-    if (result === null) {
-      setDraft(String(value));
-      return;
-    }
-
-    const bounded = Math.max(min ?? -Infinity, Math.min(max ?? Infinity, result));
-    draftRef.current = String(bounded);
-    valueRef.current = bounded;
-    setDraft(String(bounded));
-    if (bounded !== value) onChange(bounded);
-  };
-
-  return (
-    <label className="field field--number">
-      <span>{label}</span>
-      <input
-        type="text"
-        inputMode="decimal"
-        role="spinbutton"
-        aria-valuenow={value}
-        aria-valuemin={min}
-        aria-valuemax={max}
-        value={draft}
-        className={scrubbing ? "is-scrubbing" : undefined}
-        title="Enter math, scroll while focused, or drag horizontally"
-        data-glyph-history={historyManaged || undefined}
-        onChange={(event) => {
-          draftRef.current = event.target.value;
-          setDraft(event.target.value);
-        }}
-        onBlur={(event) => commit(event.currentTarget.value)}
-        onWheel={(event) => {
-          if (document.activeElement !== event.currentTarget || event.deltaY === 0) return;
-          event.preventDefault();
-          startInteraction();
-          stepValue(event.deltaY < 0 ? 1 : -1);
-          if (wheelEndTimerRef.current !== null) window.clearTimeout(wheelEndTimerRef.current);
-          wheelEndTimerRef.current = window.setTimeout(() => {
-            wheelEndTimerRef.current = null;
-            endInteraction();
-          }, 150);
-        }}
-        onPointerDown={(event) => {
-          if (event.button !== 0) return;
-          const startValue = evaluateArithmeticExpression(draftRef.current) ?? valueRef.current;
-          dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startValue, steps: 0, active: false };
-          event.currentTarget.setPointerCapture(event.pointerId);
-        }}
-        onPointerMove={(event) => {
-          const drag = dragRef.current;
-          if (!drag || drag.pointerId !== event.pointerId) return;
-          const steps = horizontalDragSteps(event.clientX - drag.startX);
-          if (steps === drag.steps) return;
-          event.preventDefault();
-          if (!drag.active) {
-            drag.active = true;
-            setScrubbing(true);
-            startInteraction();
-          }
-          collapseSelection(event.currentTarget);
-          drag.steps = steps;
-          const next = adjustBoundedValue(drag.startValue, steps, min, max);
-          const previous = valueRef.current;
-          const nextDraft = String(next);
-          draftRef.current = nextDraft;
-          valueRef.current = next;
-          setDraft(nextDraft);
-          if (next !== previous) onChange(next);
-        }}
-        onPointerUp={(event) => {
-          const drag = dragRef.current;
-          if (!drag || drag.pointerId !== event.pointerId) return;
-          if (drag.active) {
-            event.preventDefault();
-            collapseSelection(event.currentTarget);
-          }
-          if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-          dragRef.current = null;
-          if (drag.active) {
-            setScrubbing(false);
-            endInteraction();
-          }
-        }}
-        onPointerCancel={() => {
-          const wasActive = dragRef.current?.active;
-          dragRef.current = null;
-          if (wasActive) {
-            setScrubbing(false);
-            endInteraction();
-          }
-        }}
-        onSelect={(event) => {
-          if (dragRef.current?.active) collapseSelection(event.currentTarget);
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-            event.preventDefault();
-            startInteraction();
-            stepValue(event.key === "ArrowUp" ? 1 : -1);
-            endInteraction();
-          }
-          if (event.key === "Enter") commit(event.currentTarget.value);
-          if (event.key === "Escape") setDraft(String(value));
-        }}
-      />
-    </label>
-  );
-}
 
 function App() {
   const [atlas, setAtlas] = useState<AtlasImage | null>(null);
   const [atlasBlob, setAtlasBlob] = useState<Blob | null>(null);
   const [glyphHistory, dispatchGlyphHistory] = useReducer(glyphHistoryReducer, undefined, () => createGlyphHistory());
+  useHistoryKeys(dispatchGlyphHistory);
   const { glyphs, selectedId } = glyphHistory.present;
-  const [zoom, setZoom] = useState(1);
-  const [settings, setSettings] = useState<DetectionSettings>(DEFAULT_SETTINGS);
-  const [grid, setGrid] = useState<GridSettings>(DEFAULT_GRID);
-  const [candidateCharset, setCandidateCharset] = useState(DEFAULT_CHARSET);
-  const [characterMap, setCharacterMap] = useState(DEFAULT_CHARSET);
-  const [recognitionThreshold, setRecognitionThreshold] = useState(99);
+  const [work, setWork] = useReducer(patchWork, undefined, defaultWork);
+  const {
+    zoom,
+    settings,
+    grid,
+    candidateCharset,
+    characterMap,
+    recognitionThreshold,
+    fontName,
+    lineHeight,
+    previewText,
+    previewZoom,
+    paneSizes,
+  } = work;
   const [recognitionState, setRecognitionState] = useState<{
     phase: "idle" | "loading" | "running" | "error";
     progress: number;
     message: string;
   }>({ phase: "idle", progress: 0, message: "" });
-  const [fontName, setFontName] = useState("Pixel Font");
-  const [lineHeight, setLineHeight] = useState(16);
-  const [previewText, setPreviewText] = useState(DEFAULT_PREVIEW_TEXT);
-  const [previewZoom, setPreviewZoom] = useState(1);
-  const [paneSizes, setPaneSizes] = useState<PaneSizes>(DEFAULT_PANE_SIZES);
-  const [resizingPane, setResizingPane] = useState<PaneResizeMode | null>(null);
-  const [pixel, setPixel] = useState<{ x: number; y: number; rgba: number[] } | null>(null);
+  const [pixel, setPixel] = useState<Pixel | null>(null);
   const [dragging, setDragging] = useState(false);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
@@ -374,6 +85,11 @@ function App() {
   const recognitionRunRef = useRef(0);
   const bootStartedRef = useRef(false);
   const persistenceRequestedRef = useRef(false);
+  const saveRevisionRef = useRef(0);
+  const saveQueueRef = useRef<SaveQueue<ProjectDocument> | null>(null);
+  if (!saveQueueRef.current) {
+    saveQueueRef.current = new SaveQueue((project) => projectStore.put(project));
+  }
   const dragRef = useRef<{
     id: number;
     mode: "move" | "resize";
@@ -381,6 +97,8 @@ function App() {
     startY: number;
     glyph: Glyph;
   } | null>(null);
+  const setPaneSizes = useCallback((value: typeof paneSizes) => setWork({ paneSizes: value }), []);
+  const panes = usePanes(workspaceRef, paneSizes, setPaneSizes);
 
   const selected = glyphs.find((glyph) => glyph.id === selectedId) ?? null;
   const duplicateCharacters = useMemo(() => findDuplicateCharacters(glyphs), [glyphs]);
@@ -405,17 +123,7 @@ function App() {
     setActiveProjectName(project.name);
     setActiveProjectCreatedAt(project.createdAt);
     dispatchGlyphHistory({ type: "reset", glyphs: project.glyphs, selectedId: project.selectedId });
-    setZoom(project.zoom);
-    setSettings(project.settings);
-    setGrid(project.grid);
-    setCandidateCharset(project.candidateCharset);
-    setCharacterMap(project.characterMap);
-    setRecognitionThreshold(project.recognitionThreshold);
-    setFontName(project.fontName);
-    setLineHeight(project.lineHeight);
-    setPreviewText(project.previewText);
-    setPreviewZoom(project.previewZoom);
-    setPaneSizes(project.paneSizes);
+    setWork(workFrom(project));
     setRecognitionState({ phase: "idle", progress: 0, message: "" });
     setSaveState("saved");
     setStorageMessage("");
@@ -435,28 +143,13 @@ function App() {
     try {
       const decoded = await decodeAtlas(file, file.name);
       const now = Date.now();
-      const project: ProjectDocument = {
-        schemaVersion: 1,
+      const project = projectFromImage({
         id: crypto.randomUUID(),
-        name: file.name.replace(/\.[^.]+$/, ""),
-        createdAt: now,
-        updatedAt: now,
+        now,
         atlas: { name: file.name, type: file.type || "application/octet-stream", blob: file },
-        glyphs: [],
-        selectedId: null,
-        zoom: 1,
-        settings: { ...DEFAULT_SETTINGS },
-        grid: { ...DEFAULT_GRID },
-        candidateCharset: DEFAULT_CHARSET,
-        characterMap: DEFAULT_CHARSET,
-        recognitionThreshold: 99,
-        fontName: file.name.replace(/\.[^.]+$/, ""),
-        lineHeight: Math.min(32, decoded.atlas.height),
-        previewText: DEFAULT_PREVIEW_TEXT,
-        previewZoom: 1,
-        paneSizes: { ...DEFAULT_PANE_SIZES },
-      };
-      await putProject(project);
+        height: decoded.atlas.height,
+      });
+      await projectStore.put(project);
       applyAtlas(decoded.atlas, decoded.url, file);
       await applyProjectStateOnly(project);
       setProjects((current) => [summarizeProject(project), ...current.filter(({ id }) => id !== project.id)]);
@@ -470,46 +163,42 @@ function App() {
 
   const buildCurrentProject = useCallback((): ProjectDocument | null => {
     if (!activeProjectId || !atlas || !atlasBlob) return null;
-    return {
-      schemaVersion: 1,
-      id: activeProjectId,
-      name: activeProjectName || fontName || "Untitled project",
-      createdAt: activeProjectCreatedAt || Date.now(),
-      updatedAt: Date.now(),
-      atlas: { name: atlas.name, type: atlasBlob.type || "application/octet-stream", blob: atlasBlob },
+    return updateProject(
+      {
+        id: activeProjectId,
+        createdAt: activeProjectCreatedAt || Date.now(),
+        atlas: { name: atlas.name, type: atlasBlob.type || "application/octet-stream", blob: atlasBlob },
+      },
+      activeProjectName || fontName || "Untitled project",
       glyphs,
       selectedId,
-      zoom,
-      settings,
-      grid,
-      candidateCharset,
-      characterMap,
-      recognitionThreshold,
-      fontName,
-      lineHeight,
-      previewText,
-      previewZoom,
-      paneSizes,
-    };
-  }, [activeProjectCreatedAt, activeProjectId, activeProjectName, atlas, atlasBlob, candidateCharset, characterMap, fontName, glyphs, grid, lineHeight, paneSizes, previewText, previewZoom, recognitionThreshold, selectedId, settings, zoom]);
+      work,
+      Date.now(),
+    );
+  }, [activeProjectCreatedAt, activeProjectId, activeProjectName, atlas, atlasBlob, fontName, glyphs, selectedId, work]);
 
   const saveCurrentProject = useCallback(async () => {
     const project = buildCurrentProject();
     if (!project) return true;
+    const revision = ++saveRevisionRef.current;
     setSaveState("saving");
     try {
-      await putProject(project);
-      setProjects((current) => [summarizeProject(project), ...current.filter(({ id }) => id !== project.id)]);
-      setSaveState("saved");
-      setStorageMessage("");
+      const saved = await saveQueueRef.current!.save(project);
+      setProjects((current) => [summarizeProject(saved), ...current.filter(({ id }) => id !== saved.id)]);
+      if (revision === saveRevisionRef.current) {
+        setSaveState("saved");
+        setStorageMessage("");
+      }
       if (!persistenceRequestedRef.current && navigator.storage?.persist) {
         persistenceRequestedRef.current = true;
         void navigator.storage.persist();
       }
       return true;
     } catch (error) {
-      setSaveState("error");
-      setStorageMessage(error instanceof Error ? error.message : "Local save failed.");
+      if (revision === saveRevisionRef.current) {
+        setSaveState("error");
+        setStorageMessage(error instanceof Error ? error.message : "Local save failed.");
+      }
       return false;
     }
   }, [buildCurrentProject]);
@@ -519,10 +208,10 @@ function App() {
     bootStartedRef.current = true;
     void (async () => {
       try {
-        const storedProjects = await listProjects();
+        const storedProjects = await projectStore.list();
         setProjects(storedProjects);
         if (storedProjects[0]) {
-          const project = await getProject(storedProjects[0].id);
+          const project = await projectStore.get(storedProjects[0].id);
           if (project) await applyProject(project);
         } else {
           setStorageReady(true);
@@ -562,33 +251,11 @@ function App() {
     const handleWheel = (event: WheelEvent) => {
       if (!event.ctrlKey) return;
       event.preventDefault();
-      setZoom((value) => Math.max(1, Math.min(16, value + (event.deltaY < 0 ? 1 : -1))));
+      setWork({ zoom: Math.max(1, Math.min(16, zoom + (event.deltaY < 0 ? 1 : -1))) });
     };
     scroll.addEventListener("wheel", handleWheel, { passive: false });
     return () => scroll.removeEventListener("wheel", handleWheel);
-  }, []);
-
-  useEffect(() => {
-    const handleHistoryShortcut = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
-      const key = event.key.toLowerCase();
-      const isUndo = key === "z" && !event.shiftKey;
-      const isRedo = key === "y" || (key === "z" && event.shiftKey);
-      if (!isUndo && !isRedo) return;
-
-      const target = event.target as HTMLElement | null;
-      const isEditable = target instanceof HTMLInputElement
-        || target instanceof HTMLTextAreaElement
-        || Boolean(target?.isContentEditable);
-      if (isEditable && !target?.closest("[data-glyph-history='true']")) return;
-
-      event.preventDefault();
-      dispatchGlyphHistory({ type: isUndo ? "undo" : "redo" });
-    };
-
-    window.addEventListener("keydown", handleHistoryShortcut);
-    return () => window.removeEventListener("keydown", handleHistoryShortcut);
-  }, []);
+  }, [zoom]);
 
   const detectShapes = () => {
     if (!atlas) return;
@@ -598,7 +265,7 @@ function App() {
     const detection = detectGlyphsWithMetrics(atlas.pixels, settings);
     const found = assignCharacters(detection.glyphs, characterMap);
     dispatchGlyphHistory({ type: "replace", glyphs: found, selectedId: found[0]?.id ?? null });
-    if (detection.lineHeight > 0) setLineHeight(detection.lineHeight);
+    if (detection.lineHeight > 0) setWork({ lineHeight: detection.lineHeight });
   };
 
   const recognizeSymbols = async () => {
@@ -621,26 +288,25 @@ function App() {
         const { createTesseractRecognizer } = await import("./lib/tesseractRecognition");
         recognizerRef.current = createTesseractRecognizer();
       }
-      const results = await recognizerRef.current.recognize(request, controller.signal, (progress, message) => {
+      const run = await runRecognition(request, recognizerRef.current, createTemplateRecognizer(), controller.signal, (progress, message) => {
         if (runId !== recognitionRunRef.current) return;
         setRecognitionState({ phase: "running", progress, message });
       });
       if (controller.signal.aborted || runId !== recognitionRunRef.current) return;
-      const found = applyRecognitionResults(glyphs, results, recognitionThreshold / 100);
-      setCharacterMap(createCharacterMap(found));
+      const found = applyRecognitionResults(glyphs, run.results, recognitionThreshold / 100);
+      setWork({ characterMap: createCharacterMap(found) });
       dispatchGlyphHistory({ type: "replace", glyphs: found, selectedId: found[0]?.id ?? null });
-      setRecognitionState({ phase: "idle", progress: 1, message: "Offline OCR complete" });
+      setRecognitionState(run.fallbackUsed ? {
+        phase: "error",
+        progress: 1,
+        message: `Offline OCR failed; template fallback used. ${run.primaryError}`,
+      } : { phase: "idle", progress: 1, message: "Offline OCR complete" });
     } catch (error) {
       if (controller.signal.aborted || runId !== recognitionRunRef.current) return;
-      const fallback = createTemplateRecognizer();
-      const results = await fallback.recognize(request, controller.signal, () => {});
-      const found = applyRecognitionResults(glyphs, results, recognitionThreshold / 100);
-      setCharacterMap(createCharacterMap(found));
-      dispatchGlyphHistory({ type: "replace", glyphs: found, selectedId: found[0]?.id ?? null });
       setRecognitionState({
         phase: "error",
         progress: 1,
-        message: `Offline OCR failed; template fallback used. ${error instanceof Error ? error.message : "Unknown error"}`,
+        message: error instanceof Error ? error.message : "Recognition failed",
       });
     }
   };
@@ -711,68 +377,6 @@ function App() {
     };
   }, [atlas, dragging, zoom]);
 
-  useEffect(() => {
-    if (!resizingPane) return;
-
-    const move = (event: PointerEvent) => {
-      const workspace = workspaceRef.current;
-      if (!workspace) return;
-      const rect = workspace.getBoundingClientRect();
-
-      setPaneSizes((current) => {
-        if (resizingPane === "left") {
-          const max = Math.max(PANE_LIMITS.left, rect.width - current.right - PANE_LIMITS.canvas - PANE_LIMITS.splitter * 2);
-          return { ...current, left: Math.max(PANE_LIMITS.left, Math.min(max, event.clientX - rect.left)) };
-        }
-        if (resizingPane === "right") {
-          const max = Math.max(PANE_LIMITS.right, rect.width - current.left - PANE_LIMITS.canvas - PANE_LIMITS.splitter * 2);
-          return { ...current, right: Math.max(PANE_LIMITS.right, Math.min(max, rect.right - event.clientX)) };
-        }
-        const max = Math.max(PANE_LIMITS.preview, rect.height - PANE_LIMITS.upperWorkspace - PANE_LIMITS.splitter);
-        return { ...current, preview: Math.max(PANE_LIMITS.preview, Math.min(max, rect.bottom - event.clientY)) };
-      });
-    };
-    const up = () => setResizingPane(null);
-
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up, { once: true });
-    return () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-  }, [resizingPane]);
-
-  const resizePaneByKeyboard = (event: React.KeyboardEvent, pane: PaneResizeMode) => {
-    const workspace = workspaceRef.current;
-    if (!workspace) return;
-    const rect = workspace.getBoundingClientRect();
-    let delta = 0;
-
-    if (pane === "left" && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
-      delta = event.key === "ArrowLeft" ? -16 : 16;
-    } else if (pane === "right" && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
-      delta = event.key === "ArrowLeft" ? 16 : -16;
-    } else if (pane === "preview" && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
-      delta = event.key === "ArrowUp" ? 16 : -16;
-    } else {
-      return;
-    }
-
-    event.preventDefault();
-    setPaneSizes((current) => {
-      if (pane === "left") {
-        const max = Math.max(PANE_LIMITS.left, rect.width - current.right - PANE_LIMITS.canvas - PANE_LIMITS.splitter * 2);
-        return { ...current, left: Math.max(PANE_LIMITS.left, Math.min(max, current.left + delta)) };
-      }
-      if (pane === "right") {
-        const max = Math.max(PANE_LIMITS.right, rect.width - current.left - PANE_LIMITS.canvas - PANE_LIMITS.splitter * 2);
-        return { ...current, right: Math.max(PANE_LIMITS.right, Math.min(max, current.right + delta)) };
-      }
-      const max = Math.max(PANE_LIMITS.preview, rect.height - PANE_LIMITS.upperWorkspace - PANE_LIMITS.splitter);
-      return { ...current, preview: Math.max(PANE_LIMITS.preview, Math.min(max, current.preview + delta)) };
-    });
-  };
-
   const startDrag = (event: React.PointerEvent, glyph: Glyph, mode: "move" | "resize") => {
     event.preventDefault();
     event.stopPropagation();
@@ -837,28 +441,13 @@ function App() {
         throw new Error(`Character ${invalidGlyph.char} extends outside the atlas.`);
       }
       const now = Date.now();
-      const project: ProjectDocument = {
-        schemaVersion: 1,
+      const project = projectFromFnt({
         id: crypto.randomUUID(),
-        name: parsed.fontName,
-        createdAt: now,
-        updatedAt: now,
+        now,
         atlas: { name: imageFile.name, type: imageFile.type || "application/octet-stream", blob: imageFile },
-        glyphs: parsed.glyphs,
-        selectedId: parsed.glyphs[0]?.id ?? null,
-        zoom: 1,
-        settings: { ...DEFAULT_SETTINGS },
-        grid: { ...DEFAULT_GRID },
-        candidateCharset: DEFAULT_CHARSET,
-        characterMap: createCharacterMap(parsed.glyphs),
-        recognitionThreshold: 99,
-        fontName: parsed.fontName,
-        lineHeight: parsed.lineHeight,
-        previewText: DEFAULT_PREVIEW_TEXT,
-        previewZoom: 1,
-        paneSizes: { ...DEFAULT_PANE_SIZES },
-      };
-      await putProject(project);
+        parsed,
+      });
+      await projectStore.put(project);
       applyAtlas(decoded.atlas, decoded.url, imageFile);
       await applyProjectStateOnly(project);
       setProjects((current) => [summarizeProject(project), ...current.filter(({ id }) => id !== project.id)]);
@@ -880,7 +469,7 @@ function App() {
         const saved = await saveCurrentProject();
         if (!saved && !window.confirm("Latest changes could not be saved. Switch projects anyway?")) return;
       }
-      const project = await getProject(id);
+      const project = await projectStore.get(id);
       if (!project) throw new Error("Project no longer exists.");
       await applyProject(project);
       setProjectsOpen(false);
@@ -895,10 +484,10 @@ function App() {
     const name = window.prompt("Project name", summary.name)?.trim();
     if (!name || name === summary.name) return;
     try {
-      const project = summary.id === activeProjectId ? buildCurrentProject() : await getProject(summary.id);
+      const project = summary.id === activeProjectId ? buildCurrentProject() : await projectStore.get(summary.id);
       if (!project) throw new Error("Project no longer exists.");
       const renamed = { ...project, name, updatedAt: Date.now() };
-      await putProject(renamed);
+      await projectStore.put(renamed);
       if (summary.id === activeProjectId) setActiveProjectName(name);
       setProjects((current) => [summarizeProject(renamed), ...current.filter(({ id }) => id !== renamed.id)]);
     } catch (error) {
@@ -909,11 +498,11 @@ function App() {
 
   const duplicateStoredProject = async (summary: ProjectSummary) => {
     try {
-      const source = summary.id === activeProjectId ? buildCurrentProject() : await getProject(summary.id);
+      const source = summary.id === activeProjectId ? buildCurrentProject() : await projectStore.get(summary.id);
       if (!source) throw new Error("Project no longer exists.");
       const now = Date.now();
       const copy: ProjectDocument = { ...source, id: crypto.randomUUID(), name: `${source.name} copy`, createdAt: now, updatedAt: now };
-      await putProject(copy);
+      await projectStore.put(copy);
       setProjects((current) => [summarizeProject(copy), ...current]);
       await applyProject(copy);
       setProjectsOpen(false);
@@ -932,17 +521,7 @@ function App() {
     setActiveProjectName("");
     setActiveProjectCreatedAt(0);
     dispatchGlyphHistory({ type: "reset" });
-    setZoom(1);
-    setSettings({ ...DEFAULT_SETTINGS });
-    setGrid({ ...DEFAULT_GRID });
-    setCandidateCharset(DEFAULT_CHARSET);
-    setCharacterMap(DEFAULT_CHARSET);
-    setRecognitionThreshold(99);
-    setFontName("Pixel Font");
-    setLineHeight(16);
-    setPreviewText(DEFAULT_PREVIEW_TEXT);
-    setPreviewZoom(1);
-    setPaneSizes({ ...DEFAULT_PANE_SIZES });
+    setWork(defaultWork());
     setStorageReady(true);
     setSaveState("idle");
   };
@@ -950,13 +529,13 @@ function App() {
   const removeStoredProject = async (summary: ProjectSummary) => {
     if (!window.confirm(`Delete local project "${summary.name}"? This cannot be undone.`)) return;
     try {
-      await deleteProject(summary.id);
+      await projectStore.delete(summary.id);
       const remaining = projects.filter(({ id }) => id !== summary.id);
       setProjects(remaining);
       if (summary.id === activeProjectId) {
         setStorageReady(false);
         if (remaining[0]) {
-          const nextProject = await getProject(remaining[0].id);
+          const nextProject = await projectStore.get(remaining[0].id);
           if (nextProject) await applyProject(nextProject);
           else clearWorkspace();
         } else clearWorkspace();
@@ -969,22 +548,12 @@ function App() {
 
   const exportFnt = () => {
     if (!atlas) return;
-    const url = URL.createObjectURL(new Blob([fntPreview], { type: "text/plain" }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${fontName.trim().replace(/\s+/g, "-").toLowerCase() || "font"}.fnt`;
-    link.click();
-    URL.revokeObjectURL(url);
+    downloadText(fntPreview, `${fontName.trim().replace(/\s+/g, "-").toLowerCase() || "font"}.fnt`);
   };
 
   const exportAtlas = () => {
     if (!atlas || !atlasBlob) return;
-    const url = URL.createObjectURL(atlasBlob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = atlas.name;
-    link.click();
-    URL.revokeObjectURL(url);
+    download(atlasBlob, atlas.name);
   };
 
   const mappedCount = glyphs.filter((glyph) => glyph.char).length;
@@ -1028,87 +597,46 @@ function App() {
           if (files.length) void importFntAndAtlas(files);
         }}
       />
+      <input ref={fileInput} className="sr-only" type="file" accept=".png,.webp,image/png,image/webp" onChange={(event) => {
+        const file = event.target.files?.[0];
+        event.target.value = "";
+        if (file) void startProjectFromImage(file);
+      }} />
 
-      {projectsOpen && (
-        <div className="project-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setProjectsOpen(false); }}>
-          <section className="project-dialog" role="dialog" aria-modal="true" aria-labelledby="projects-title">
-            <div className="project-dialog-header">
-              <div><span className="eyebrow">LOCAL WORKSPACE</span><h2 id="projects-title">Projects</h2></div>
-              <button className="icon-button" aria-label="Close projects" onClick={() => setProjectsOpen(false)}>×</button>
-            </div>
-            <div className="project-actions">
-              <button className="button button--primary" onClick={() => fileInput.current?.click()}><Plus size={16} /> New from image</button>
-              <button className="button" onClick={() => importInput.current?.click()}><Upload size={16} /> Import .fnt + image</button>
-            </div>
-            {storageMessage && saveState === "error" && <p className="project-error">{storageMessage}</p>}
-            <div className="project-list">
-              {projects.length === 0 ? <p className="project-empty">No local projects yet.</p> : projects.map((project) => (
-                <article className={`project-row ${project.id === activeProjectId ? "is-active" : ""}`} key={project.id}>
-                  <button className="project-open" onClick={() => void openStoredProject(project.id)}>
-                    <strong>{project.name}</strong>
-                    <small>{project.atlasName} · {new Date(project.updatedAt).toLocaleString()}</small>
-                  </button>
-                  <div className="project-row-actions">
-                    <button className="icon-button" aria-label={`Rename ${project.name}`} title="Rename" onClick={() => void renameStoredProject(project)}><Pencil size={15} /></button>
-                    <button className="icon-button" aria-label={`Duplicate ${project.name}`} title="Duplicate" onClick={() => void duplicateStoredProject(project)}><Copy size={15} /></button>
-                    <button className="icon-button danger" aria-label={`Delete ${project.name}`} title="Delete" onClick={() => void removeStoredProject(project)}><Trash2 size={15} /></button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          </section>
-        </div>
-      )}
+      <Projects
+        open={projectsOpen}
+        projects={projects}
+        activeId={activeProjectId}
+        error={saveState === "error" ? storageMessage : ""}
+        onClose={() => setProjectsOpen(false)}
+        onNew={() => fileInput.current?.click()}
+        onImport={() => importInput.current?.click()}
+        onOpen={(id) => void openStoredProject(id)}
+        onRename={(project) => void renameStoredProject(project)}
+        onCopy={(project) => void duplicateStoredProject(project)}
+        onDelete={(project) => void removeStoredProject(project)}
+      />
 
       <main
         ref={workspaceRef}
-        className={`workspace ${resizingPane ? `is-resizing-${resizingPane}` : ""}`}
+        className={`workspace ${panes.active ? `is-resizing-${panes.active}` : ""}`}
         style={{
           "--left-panel-width": `${paneSizes.left}px`,
           "--right-panel-width": `${paneSizes.right}px`,
           "--preview-panel-height": `${paneSizes.preview}px`,
         } as React.CSSProperties}
       >
-        <aside className="sidebar left-panel" aria-label="Atlas controls">
-          <section>
-            <div className="section-title"><span>01</span><h2>Source atlas</h2></div>
-            <button className="upload-card" onClick={() => fileInput.current?.click()}>
-              <Upload size={22} />
-              <strong>New project from image</strong>
-              <small>PNG or WebP · saved locally</small>
-            </button>
-            <input ref={fileInput} className="sr-only" type="file" accept=".png,.webp,image/png,image/webp" onChange={(event) => {
-              const file = event.target.files?.[0];
-              event.target.value = "";
-              if (file) void startProjectFromImage(file);
-            }} />
-            <button className="button button--wide" onClick={() => importInput.current?.click()}><Upload size={16} /> Import .fnt + image</button>
-          </section>
-
-          <section>
-            <div className="section-title"><span>02</span><h2>Find glyphs</h2></div>
-            <div className="mode-label"><ScanLine size={15} /> Connected pixels</div>
-            <div className="field-grid">
-              <NumberField label="Alpha ≥" value={settings.alphaThreshold} min={1} max={255} onChange={(alphaThreshold) => setSettings({ ...settings, alphaThreshold })} />
-              <NumberField label="Padding" value={settings.padding} min={0} max={32} onChange={(padding) => setSettings({ ...settings, padding })} />
-              <NumberField label="Min area" value={settings.minArea} min={1} onChange={(minArea) => setSettings({ ...settings, minArea })} />
-              <NumberField label="Advance adjust" value={settings.advanceAdjustment} onChange={(advanceAdjustment) => setSettings({ ...settings, advanceAdjustment })} />
-            </div>
-            <button className="button button--wide" disabled={!atlas} onClick={detectShapes}><ScanLine size={16} /> Detect shapes</button>
-
-            <div className="divider"><span>OR USE GRID</span></div>
-            <div className="mode-label"><Grid3X3 size={15} /> Fixed cells</div>
-            <div className="field-grid">
-              <NumberField label="Cell W" value={grid.width} min={1} onChange={(width) => setGrid({ ...grid, width })} />
-              <NumberField label="Cell H" value={grid.height} min={1} onChange={(height) => setGrid({ ...grid, height })} />
-              <NumberField label="Offset X" value={grid.offsetX} min={0} onChange={(offsetX) => setGrid({ ...grid, offsetX })} />
-              <NumberField label="Offset Y" value={grid.offsetY} min={0} onChange={(offsetY) => setGrid({ ...grid, offsetY })} />
-              <NumberField label="Gap X" value={grid.gapX} min={0} onChange={(gapX) => setGrid({ ...grid, gapX })} />
-              <NumberField label="Gap Y" value={grid.gapY} min={0} onChange={(gapY) => setGrid({ ...grid, gapY })} />
-            </div>
-            <button className="button button--wide" disabled={!atlas} onClick={applyGrid}><Grid3X3 size={16} /> Build grid</button>
-          </section>
-        </aside>
+        <AtlasPanel
+          hasAtlas={Boolean(atlas)}
+          settings={settings}
+          grid={grid}
+          onSettings={(value) => setWork({ settings: value })}
+          onGridChange={(value) => setWork({ grid: value })}
+          onNew={() => fileInput.current?.click()}
+          onImport={() => importInput.current?.click()}
+          onDetect={detectShapes}
+          onBuildGrid={applyGrid}
+        />
 
         <div
           className="pane-splitter pane-splitter--left"
@@ -1119,66 +647,30 @@ function App() {
           aria-valuemax={1000}
           aria-valuenow={Math.round(paneSizes.left)}
           tabIndex={0}
-          onPointerDown={(event) => { event.preventDefault(); setResizingPane("left"); }}
-          onKeyDown={(event) => resizePaneByKeyboard(event, "left")}
+          onPointerDown={(event) => { event.preventDefault(); panes.start("left"); }}
+          onKeyDown={(event) => panes.onKeyDown(event, "left")}
         />
 
-        <section
-          className={`canvas-panel ${dragging ? "is-dragging" : ""}`}
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => {
-            event.preventDefault();
-            const files = Array.from(event.dataTransfer.files);
+        <AtlasView
+          atlas={atlas}
+          glyphs={glyphs}
+          selectedId={selectedId}
+          zoom={zoom}
+          dragging={dragging}
+          pixel={pixel}
+          scrollRef={canvasScrollRef}
+          stageRef={stageRef}
+          onFiles={(files) => {
             if (files.some((file) => /\.fnt$/i.test(file.name))) void importFntAndAtlas(files);
             else if (files[0]) void startProjectFromImage(files[0]);
           }}
-        >
-          <div className="canvas-toolbar">
-            <div className="tool-status"><MousePointer2 size={15} /> Drag boxes · resize from corner</div>
-            <div className="canvas-toolbar-actions">
-              <button className="button button--toolbar" disabled={!atlas} onClick={addCell}><Plus size={16} /> Add cell</button>
-              <div className="zoom-controls">
-                <button aria-label="Zoom out" onClick={() => setZoom((value) => Math.max(1, value - 1))}><ZoomOut size={17} /></button>
-                <span>{zoom * 100}%</span>
-                <button aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(16, value + 1))}><ZoomIn size={17} /></button>
-              </div>
-            </div>
-          </div>
-          <div ref={canvasScrollRef} className="canvas-scroll">
-            {!atlas ? (
-              <button className="empty-state" onClick={() => fileInput.current?.click()}>
-                <span className="empty-icon"><ImagePlus size={32} /></span>
-                <strong>Drop your sprite sheet here</strong>
-                <small>PNG or WebP · processed in your browser</small>
-              </button>
-            ) : (
-              <div
-                className="atlas-stage"
-                ref={stageRef}
-                style={{ width: atlas.width * zoom, height: atlas.height * zoom }}
-                onPointerMove={inspectPixel}
-                onPointerLeave={() => setPixel(null)}
-              >
-                <img src={atlas.image.src} alt={`Bitmap atlas ${atlas.name}`} draggable={false} style={{ width: atlas.width * zoom, height: atlas.height * zoom }} />
-                {glyphs.map((glyph) => (
-                  <div
-                    key={glyph.id}
-                    className={`glyph-box ${selectedId === glyph.id ? "is-selected" : ""} ${glyph.groupingStatus === "ambiguous" || (glyph.recognitionStatus && glyph.recognitionStatus !== "matched") ? "needs-review" : ""}`}
-                    style={{ left: glyph.x * zoom, top: glyph.y * zoom, width: glyph.width * zoom, height: glyph.height * zoom }}
-                    onPointerDown={(event) => startDrag(event, glyph, "move")}
-                  >
-                    <span className="glyph-tag">{glyph.char || glyph.id + 1}</span>
-                    <button aria-label={`Resize glyph ${glyph.char || glyph.id + 1}`} className="resize-handle" onPointerDown={(event) => startDrag(event, glyph, "resize")} />
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-          <footer className="canvas-footer">
-            <span>{glyphs.length} BOXES · {mappedCount} MAPPED</span>
-            <span>{pixel ? `X ${pixel.x}  Y ${pixel.y}  ·  RGBA ${pixel.rgba.join(", ")}` : "HOVER IMAGE TO INSPECT PIXEL"}</span>
-          </footer>
-        </section>
+          onNew={() => fileInput.current?.click()}
+          onAdd={addCell}
+          onZoom={(value) => setWork({ zoom: value })}
+          onInspect={inspectPixel}
+          onLeave={() => setPixel(null)}
+          onDrag={startDrag}
+        />
 
 
         <div
@@ -1190,62 +682,32 @@ function App() {
           aria-valuemax={1000}
           aria-valuenow={Math.round(paneSizes.right)}
           tabIndex={0}
-          onPointerDown={(event) => { event.preventDefault(); setResizingPane("right"); }}
-          onKeyDown={(event) => resizePaneByKeyboard(event, "right")}
+          onPointerDown={(event) => { event.preventDefault(); panes.start("right"); }}
+          onKeyDown={(event) => panes.onKeyDown(event, "right")}
         />
 
-        <aside className="sidebar right-panel" aria-label="Glyph and export settings">
-          <section>
-            <div className="section-title"><span>03</span><h2>Character map</h2></div>
-            <label className="field">
-              <span>Recognition candidates</span>
-              <textarea value={candidateCharset} onChange={(event) => setCandidateCharset(event.target.value)} rows={3} spellCheck={false} />
-            </label>
-            <label className="field">
-              <span>Characters, in reading order</span>
-              <textarea value={characterMap} onChange={(event) => setCharacterMap(event.target.value)} rows={4} spellCheck={false} />
-            </label>
-            <NumberField label="Confidence ≥ %" value={recognitionThreshold} min={0} max={100} onChange={(value) => setRecognitionThreshold(Math.max(0, Math.min(100, value)))} />
-            <button className="button button--wide" disabled={!atlas || !glyphs.length || recognitionState.phase === "loading" || recognitionState.phase === "running"} onClick={() => void recognizeSymbols()}><ScanLine size={16} /> {recognitionState.phase === "loading" || recognitionState.phase === "running" ? `${Math.round(recognitionState.progress * 100)}%` : "Recognize symbols"}</button>
-            <p className={`muted detection-note ${recognitionState.phase === "error" ? "is-error" : ""}`}>{recognitionState.message || "Offline OCR. Existing manual character edits stay untouched."}</p>
-            <button className="button button--wide" disabled={!glyphs.length} onClick={() => dispatchGlyphHistory({ type: "replace", glyphs: assignCharacters(glyphs, characterMap) })}>Apply mapping</button>
-          </section>
-
-          <section className="glyph-editor">
-            <div className="section-title"><span>04</span><h2>Selected glyph</h2></div>
-            {selected ? (
-              <>
-                <div className="glyph-heading">
-                  <div className="char-input-wrap"><input ref={glyphCharacterInputRef} aria-label="Glyph character" data-glyph-history="true" maxLength={2} value={selected.char} onChange={(e) => updateGlyph(selected.id, { char: Array.from(e.target.value)[0] ?? "" })} /></div>
-                  <div><strong>{selected.char ? `U+${selected.char.codePointAt(0)?.toString(16).toUpperCase().padStart(4, "0")}` : "UNMAPPED"}</strong><small>Glyph #{selected.id + 1}{selected.matchConfidence !== undefined ? ` · ${selected.matchProvider === "tesseract-v7" ? "OCR" : "TEMPLATE"} ${Math.round(selected.matchConfidence * 100)}%` : ""}{selected.groupingStatus === "ambiguous" ? " · GROUP REVIEW" : ""}</small></div>
-                  <button className="icon-button danger" aria-label="Delete selected glyph" onClick={() => dispatchGlyphHistory({ type: "delete", id: selected.id })}><Trash2 size={17} /></button>
-                </div>
-                {reviewGlyphs.length > 0 && <button className="button button--wide" onClick={selectNextReviewGlyph}>Next review ({reviewGlyphs.length})</button>}
-                {selected.recognitionError && <p className="muted detection-note is-error">{selected.recognitionError}</p>}
-                <div className="field-grid">
-                  <NumberField historyManaged label="X" value={selected.x} min={0} max={atlas ? atlas.width - 1 : undefined} onChange={(x) => updateGlyph(selected.id, { x })} onInteractionStart={() => dispatchGlyphHistory({ type: "beginTransaction" })} onInteractionEnd={() => dispatchGlyphHistory({ type: "endTransaction" })} />
-                  <NumberField historyManaged label="Y" value={selected.y} min={0} max={atlas ? atlas.height - 1 : undefined} onChange={(y) => updateGlyph(selected.id, { y })} onInteractionStart={() => dispatchGlyphHistory({ type: "beginTransaction" })} onInteractionEnd={() => dispatchGlyphHistory({ type: "endTransaction" })} />
-                  <NumberField historyManaged label="Width" value={selected.width} min={1} onChange={(width) => updateGlyph(selected.id, { width })} onInteractionStart={() => dispatchGlyphHistory({ type: "beginTransaction" })} onInteractionEnd={() => dispatchGlyphHistory({ type: "endTransaction" })} />
-                  <NumberField historyManaged label="Height" value={selected.height} min={1} onChange={(height) => updateGlyph(selected.id, { height })} onInteractionStart={() => dispatchGlyphHistory({ type: "beginTransaction" })} onInteractionEnd={() => dispatchGlyphHistory({ type: "endTransaction" })} />
-                  <NumberField historyManaged label="X offset" value={selected.xoffset} onChange={(xoffset) => updateGlyph(selected.id, { xoffset })} onInteractionStart={() => dispatchGlyphHistory({ type: "beginTransaction" })} onInteractionEnd={() => dispatchGlyphHistory({ type: "endTransaction" })} />
-                  <NumberField historyManaged label="Y offset" value={selected.yoffset} onChange={(yoffset) => updateGlyph(selected.id, { yoffset })} onInteractionStart={() => dispatchGlyphHistory({ type: "beginTransaction" })} onInteractionEnd={() => dispatchGlyphHistory({ type: "endTransaction" })} />
-                  <NumberField historyManaged label="X advance" value={selected.xadvance} min={0} onChange={(xadvance) => updateGlyph(selected.id, { xadvance })} onInteractionStart={() => dispatchGlyphHistory({ type: "beginTransaction" })} onInteractionEnd={() => dispatchGlyphHistory({ type: "endTransaction" })} />
-                </div>
-              </>
-            ) : <p className="muted">Select box on atlas to edit metrics.</p>}
-          </section>
-
-          <section>
-            <div className="section-title"><span>05</span><h2>Font output</h2></div>
-            <label className="field"><span>Font name</span><input value={fontName} onChange={(event) => setFontName(event.target.value)} /></label>
-            <NumberField label="Line height" value={lineHeight} min={1} onChange={setLineHeight} />
-            <div className="export-summary"><span>BMFont text</span><strong>{mappedCount} characters</strong><small>{atlas?.name ?? "No texture"}</small></div>
-            {duplicateCharacters.length > 0 && <p className="muted detection-note is-error">Duplicate characters block export: {duplicateCharacters.join(" ")}</p>}
-            <button className="button button--primary button--wide" disabled={!atlas || mappedCount === 0 || duplicateCharacters.length > 0} onClick={exportFnt}><Download size={16} /> Download .fnt</button>
-            <button className="button button--wide" disabled={!atlasBlob} onClick={exportAtlas}><Download size={16} /> Download atlas</button>
-          </section>
-
-        </aside>
+        <EditPanel
+          atlas={atlas}
+          hasBlob={Boolean(atlasBlob)}
+          glyphs={glyphs}
+          selected={selected}
+          reviewCount={reviewGlyphs.length}
+          mappedCount={mappedCount}
+          duplicates={duplicateCharacters}
+          work={work}
+          status={recognitionState}
+          inputRef={glyphCharacterInputRef}
+          onWork={setWork}
+          onRecognize={() => void recognizeSymbols()}
+          onApplyMap={() => dispatchGlyphHistory({ type: "replace", glyphs: assignCharacters(glyphs, characterMap) })}
+          onGlyph={(patch) => { if (selected) updateGlyph(selected.id, patch); }}
+          onDelete={() => { if (selected) dispatchGlyphHistory({ type: "delete", id: selected.id }); }}
+          onNext={selectNextReviewGlyph}
+          onEditStart={() => dispatchGlyphHistory({ type: "beginTransaction" })}
+          onEditEnd={() => dispatchGlyphHistory({ type: "endTransaction" })}
+          onExportFnt={exportFnt}
+          onExportAtlas={exportAtlas}
+        />
 
 
         <div
@@ -1257,8 +719,8 @@ function App() {
           aria-valuemax={1000}
           aria-valuenow={Math.round(paneSizes.preview)}
           tabIndex={0}
-          onPointerDown={(event) => { event.preventDefault(); setResizingPane("preview"); }}
-          onKeyDown={(event) => resizePaneByKeyboard(event, "preview")}
+          onPointerDown={(event) => { event.preventDefault(); panes.start("preview"); }}
+          onKeyDown={(event) => panes.onKeyDown(event, "preview")}
         />
 
         <section className="live-preview-panel" aria-labelledby="preview-title">
@@ -1270,17 +732,17 @@ function App() {
                 <span className="guide-legend-item guide-legend-item--baseline">Baseline</span>
               </div>
               <div className="zoom-controls preview-zoom-controls" aria-label="Preview zoom controls">
-                <button aria-label="Zoom preview out" disabled={previewZoom === 1} onClick={() => setPreviewZoom((value) => Math.max(1, value - 1))}><ZoomOut size={17} /></button>
+                <button aria-label="Zoom preview out" disabled={previewZoom === 1} onClick={() => setWork({ previewZoom: Math.max(1, previewZoom - 1) })}><ZoomOut size={17} /></button>
                 <span>{previewZoom}×</span>
-                <button aria-label="Zoom preview in" disabled={previewZoom === 8} onClick={() => setPreviewZoom((value) => Math.min(8, value + 1))}><ZoomIn size={17} /></button>
+                <button aria-label="Zoom preview in" disabled={previewZoom === 8} onClick={() => setWork({ previewZoom: Math.min(8, previewZoom + 1) })}><ZoomIn size={17} /></button>
               </div>
             </div>
           </div>
           <label className="field preview-text-field">
             <span>Preview text</span>
-            <textarea value={previewText} onChange={(event) => setPreviewText(event.target.value)} rows={2} spellCheck={false} />
+            <textarea value={previewText} onChange={(event) => setWork({ previewText: event.target.value })} rows={2} spellCheck={false} />
           </label>
-          <BitmapPreview atlas={atlas} glyphs={glyphs} lineHeight={lineHeight} text={previewText} zoom={previewZoom} onZoomChange={setPreviewZoom} />
+          <Preview atlas={atlas} glyphs={glyphs} lineHeight={lineHeight} text={previewText} zoom={previewZoom} onZoomChange={(value) => setWork({ previewZoom: value })} />
         </section>
       </main>
     </div>

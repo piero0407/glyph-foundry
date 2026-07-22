@@ -34,6 +34,13 @@ export type ProjectSummary = Pick<ProjectDocument, "id" | "name" | "createdAt" |
   atlasName: string;
 };
 
+export interface ProjectStore {
+  list(): Promise<ProjectSummary[]>;
+  get(id: string): Promise<ProjectDocument | null>;
+  put(project: ProjectDocument): Promise<void>;
+  delete(id: string): Promise<void>;
+}
+
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
@@ -135,3 +142,10 @@ export async function deleteProject(id: string): Promise<void> {
     database.close();
   }
 }
+
+export const projectStore: ProjectStore = {
+  list: listProjects,
+  get: getProject,
+  put: putProject,
+  delete: deleteProject,
+};
