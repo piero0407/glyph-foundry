@@ -45,7 +45,126 @@ type DetectedGlyph = {
   coreTop: number;
   coreWidth: number;
   coreHeight: number;
+  area: number;
 };
+
+type Bounds = { left: number; top: number; right: number; bottom: number };
+
+function coreBounds(item: DetectedGlyph): Bounds {
+  const left = item.glyph.x + item.coreLeft;
+  const top = item.glyph.y + item.coreTop;
+  return { left, top, right: left + item.coreWidth, bottom: top + item.coreHeight };
+}
+
+function intervalOverlap(startA: number, endA: number, startB: number, endB: number): number {
+  return Math.max(0, Math.min(endA, endB) - Math.max(startA, startB));
+}
+
+function shouldMergeStackedComponents(left: DetectedGlyph, right: DetectedGlyph): boolean {
+  const a = coreBounds(left);
+  const b = coreBounds(right);
+  const upper = a.top <= b.top ? a : b;
+  const lower = upper === a ? b : a;
+  const gap = lower.top - upper.bottom;
+  if (gap < 0) return false;
+
+  const overlap = intervalOverlap(a.left, a.right, b.left, b.right);
+  const narrowWidth = Math.min(left.coreWidth, right.coreWidth);
+  if (!narrowWidth || overlap / narrowWidth < 0.6) return false;
+
+  const centerA = (a.left + a.right) / 2;
+  const centerB = (b.left + b.right) / 2;
+  if (Math.abs(centerA - centerB) > Math.max(left.coreWidth, right.coreWidth) * 0.35) return false;
+
+  const dominantHeight = Math.max(left.coreHeight, right.coreHeight);
+  const maxGap = Math.max(2, Math.round(dominantHeight * 0.5));
+  if (gap > maxGap) return false;
+
+  const smallerArea = Math.min(left.area, right.area);
+  const largerArea = Math.max(left.area, right.area);
+  const hasSatellite = smallerArea / largerArea <= 0.4;
+  const similarWidths = Math.min(left.coreWidth, right.coreWidth) / Math.max(left.coreWidth, right.coreWidth) >= 0.75;
+  const bothStrokesOrDots = left.coreHeight <= 2 && right.coreHeight <= 2 && similarWidths;
+  return hasSatellite || bothStrokesOrDots;
+}
+
+function couldBelongToSameGlyph(left: DetectedGlyph, right: DetectedGlyph): boolean {
+  const a = coreBounds(left);
+  const b = coreBounds(right);
+  const horizontalGap = Math.max(0, Math.max(a.left, b.left) - Math.min(a.right, b.right));
+  const verticalGap = Math.max(0, Math.max(a.top, b.top) - Math.min(a.bottom, b.bottom));
+  return horizontalGap <= 2 && verticalGap <= 2;
+}
+
+function mergeDetectedGlyphs(items: DetectedGlyph[]): DetectedGlyph[] {
+  if (items.length < 2) return items;
+  const parents = items.map((_, index) => index);
+  const find = (index: number): number => {
+    while (parents[index] !== index) {
+      parents[index] = parents[parents[index]];
+      index = parents[index];
+    }
+    return index;
+  };
+  const union = (left: number, right: number) => {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot !== rightRoot) parents[rightRoot] = leftRoot;
+  };
+  const ambiguous = new Set<number>();
+
+  for (let left = 0; left < items.length; left += 1) {
+    for (let right = left + 1; right < items.length; right += 1) {
+      if (shouldMergeStackedComponents(items[left], items[right])) union(left, right);
+      else if (couldBelongToSameGlyph(items[left], items[right])) {
+        ambiguous.add(left);
+        ambiguous.add(right);
+      }
+    }
+  }
+
+  const groups = new Map<number, number[]>();
+  items.forEach((_, index) => {
+    const root = find(index);
+    groups.set(root, [...(groups.get(root) ?? []), index]);
+  });
+
+  return [...groups.values()].map((indexes) => {
+    if (indexes.length === 1) {
+      const index = indexes[0];
+      return {
+        ...items[index],
+        glyph: { ...items[index].glyph, groupingStatus: ambiguous.has(index) ? "ambiguous" : "certain" },
+      };
+    }
+
+    const members = indexes.map((index) => items[index]);
+    const cores = members.map(coreBounds);
+    const x = Math.min(...members.map(({ glyph }) => glyph.x));
+    const y = Math.min(...members.map(({ glyph }) => glyph.y));
+    const right = Math.max(...members.map(({ glyph }) => glyph.x + glyph.width));
+    const bottom = Math.max(...members.map(({ glyph }) => glyph.y + glyph.height));
+    const coreLeft = Math.min(...cores.map((bounds) => bounds.left));
+    const coreTop = Math.min(...cores.map((bounds) => bounds.top));
+    const coreRight = Math.max(...cores.map((bounds) => bounds.right));
+    const coreBottom = Math.max(...cores.map((bounds) => bounds.bottom));
+    return {
+      glyph: {
+        ...members[0].glyph,
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
+        groupingStatus: "certain",
+      },
+      coreLeft: coreLeft - x,
+      coreTop: coreTop - y,
+      coreWidth: coreRight - coreLeft,
+      coreHeight: coreBottom - coreTop,
+      area: members.reduce((sum, member) => sum + member.area, 0),
+    };
+  });
+}
 
 function applyDetectedGlyphMetrics(detected: DetectedGlyph[], advanceAdjustment: number): Glyph[] {
   if (!detected.length) return [];
@@ -178,14 +297,17 @@ export function detectGlyphsWithMetrics(
       coreTop: coreMinY - y,
       coreWidth: coreMaxX - coreMinX + 1,
       coreHeight: coreMaxY - coreMinY + 1,
+      area: core.length,
     });
   }
 
+  const grouped = mergeDetectedGlyphs(results);
+
   return {
-    glyphs: sortInReadingOrder(applyDetectedGlyphMetrics(results, settings.advanceAdjustment))
+    glyphs: sortInReadingOrder(applyDetectedGlyphMetrics(grouped, settings.advanceAdjustment))
       .map((glyph, id) => ({ ...glyph, id })),
-    lineHeight: results.length
-      ? Math.max(...results.map(({ coreHeight }) => coreHeight))
+    lineHeight: grouped.length
+      ? Math.max(...grouped.map(({ coreHeight }) => coreHeight))
       : 0,
   };
 }
@@ -201,7 +323,15 @@ export function assignCharacters(glyphs: Glyph[], characters: string): Glyph[] {
   return glyphs.map((glyph, index) => {
     const mappedCharacter = Array.from(characters)[index];
     const char = mappedCharacter === UNRECOGNIZED_CHARACTER ? "" : mappedCharacter ?? glyph.char;
-    return { ...glyph, char, matchConfidence: undefined };
+    return {
+      ...glyph,
+      char,
+      mappingSource: char ? "ordered" : undefined,
+      matchConfidence: undefined,
+      matchProvider: undefined,
+      recognitionStatus: undefined,
+      recognitionError: undefined,
+    };
   });
 }
 

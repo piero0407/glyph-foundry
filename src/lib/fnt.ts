@@ -2,6 +2,14 @@ import type { Glyph } from "../types";
 
 const safeName = (name: string) => name.replace(/["\r\n]/g, "");
 
+export function findDuplicateCharacters(glyphs: Glyph[]): string[] {
+  const counts = new Map<string, number>();
+  for (const glyph of glyphs) {
+    if (glyph.char) counts.set(glyph.char, (counts.get(glyph.char) ?? 0) + 1);
+  }
+  return [...counts].filter(([, count]) => count > 1).map(([char]) => char);
+}
+
 export function serializeFnt(
   fontName: string,
   imageName: string,
@@ -10,6 +18,8 @@ export function serializeFnt(
   lineHeight: number,
   glyphs: Glyph[],
 ): string {
+  const duplicates = findDuplicateCharacters(glyphs);
+  if (duplicates.length) throw new Error(`Duplicate BMFont characters: ${duplicates.join(" ")}`);
   const chars = glyphs.filter((glyph) => glyph.char);
   const lines = [
     `info face="${safeName(fontName)}" size=${lineHeight} bold=0 italic=0 charset="" unicode=1 stretchH=100 smooth=0 aa=1 padding=0,0,0,0 spacing=0,0`,

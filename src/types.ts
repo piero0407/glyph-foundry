@@ -8,7 +8,12 @@ export type Glyph = {
   xoffset: number;
   yoffset: number;
   xadvance: number;
+  mappingSource?: "ordered" | "manual" | "recognized";
   matchConfidence?: number;
+  matchProvider?: "template-v1" | "tesseract-v7";
+  recognitionStatus?: "matched" | "ambiguous" | "empty" | "error";
+  recognitionError?: string;
+  groupingStatus?: "certain" | "ambiguous";
 };
 
 export type AtlasImage = {

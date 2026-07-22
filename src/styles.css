@@ -176,6 +176,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   font-family: var(--font-mono);
 }
 .field input { height: 36px; padding: 0 10px; }
+.field--number input.is-scrubbing { cursor: ew-resize; user-select: none; }
 .field textarea { resize: vertical; padding: 9px 10px; line-height: 1.5; }
 .field input:focus, .field textarea:focus { border-color: hsl(var(--cyan)); }
 
@@ -271,6 +272,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   cursor: move;
 }
 .glyph-box.is-selected { border: 2px solid hsl(var(--accent)); background: hsl(var(--accent) / .1); z-index: 2; }
+.glyph-box.needs-review { border-color: hsl(var(--danger)); background: hsl(var(--danger) / .1); }
+.glyph-box.needs-review .glyph-tag { background: hsl(var(--danger)); color: white; }
 .glyph-tag { position: absolute; top: -17px; left: -1px; min-width: 16px; height: 16px; padding: 0 4px; display: grid; place-items: center; background: hsl(var(--cyan)); color: hsl(var(--accent-ink)); font: 9px var(--font-mono); pointer-events: none; }
 .glyph-box.is-selected .glyph-tag { background: hsl(var(--accent)); }
 .resize-handle { position: absolute; right: -6px; bottom: -6px; width: 12px; height: 12px; padding: 0; border: 2px solid hsl(var(--bg)); background: hsl(var(--accent)); cursor: nwse-resize; }
@@ -284,6 +287,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .glyph-heading strong { font: 12px var(--font-mono); }
 .glyph-heading small { margin-top: 3px; color: hsl(var(--muted)); font: 10px var(--font-mono); }
 .detection-note { margin: 8px 0 0; font-size: 10px; line-height: 1.4; }
+.detection-note.is-error { color: hsl(var(--danger)); }
 .char-input-wrap { width: 44px; height: 44px; }
 .char-input-wrap input { height: 100%; padding: 0; text-align: center; font-size: 21px; border-color: hsl(var(--accent)); }
 .icon-button.danger { color: hsl(var(--danger)); }

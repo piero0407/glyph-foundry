@@ -14,7 +14,7 @@ export type CharacterTemplate = {
 
 const NORMALIZED_SIZE = 24;
 
-function foregroundMask(imageData: ImageData, glyph: Glyph, alphaThreshold: number): GlyphMask | null {
+export function extractForegroundMask(imageData: ImageData, glyph: Glyph, alphaThreshold: number): GlyphMask | null {
   const { data, width: imageWidth } = imageData;
   const samples: Array<{ x: number; y: number; alpha: number; luminance: number }> = [];
   let darkest = 255;
@@ -164,7 +164,7 @@ function canvasMask(canvas: HTMLCanvasElement): GlyphMask | null {
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) return null;
   const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
-  return foregroundMask(pixels, {
+  return extractForegroundMask(pixels, {
     id: 0, char: "", x: 0, y: 0, width: canvas.width, height: canvas.height,
     xoffset: 0, yoffset: 0, xadvance: canvas.width,
   }, 16);
@@ -199,7 +199,7 @@ export function recognizeCharacters(
     }
   }
   const masks = glyphs.map((glyph) => {
-    const mask = foregroundMask(imageData, glyph, alphaThreshold);
+    const mask = extractForegroundMask(imageData, glyph, alphaThreshold);
     return mask ? normalizeMask(mask) : null;
   });
   return matchGlyphMasks(glyphs, masks, templates, minimumConfidence);

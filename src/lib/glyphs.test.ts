@@ -134,6 +134,41 @@ describe("detectGlyphs", () => {
       xadvance: 1,
     });
   });
+
+  it("groups a detached exclamation dot with its stem", () => {
+    const alphas = Array(3 * 6).fill(0);
+    for (const [x, y] of [[1, 0], [1, 1], [1, 2], [1, 5]]) alphas[y * 3 + x] = 255;
+    const settings = { alphaThreshold: 16, padding: 0, minArea: 1, advanceAdjustment: 0 };
+
+    const result = detectGlyphs(imageData(3, 6, alphas), settings);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ x: 1, y: 0, width: 1, height: 6, groupingStatus: "certain" });
+  });
+
+  it("groups equal-sign strokes without joining neighboring glyphs", () => {
+    const alphas = Array(12 * 4).fill(0);
+    for (const [x, y] of [
+      [0, 0], [1, 0], [2, 0], [0, 2], [1, 2], [2, 2],
+      [8, 0], [8, 1], [8, 2], [10, 0], [10, 1], [10, 2],
+    ]) alphas[y * 12 + x] = 255;
+    const settings = { alphaThreshold: 16, padding: 0, minArea: 1, advanceAdjustment: 0 };
+
+    const result = detectGlyphs(imageData(12, 4, alphas), settings);
+    expect(result).toHaveLength(3);
+    expect(result[0]).toMatchObject({ x: 0, y: 0, width: 3, height: 3 });
+    expect(result.slice(1).map(({ x }) => x)).toEqual([8, 10]);
+  });
+
+  it("marks close diagonal components ambiguous instead of merging them", () => {
+    const alphas = Array(4 * 4).fill(0);
+    alphas[0] = 255;
+    alphas[2 * 4 + 2] = 255;
+    const settings = { alphaThreshold: 16, padding: 0, minArea: 1, advanceAdjustment: 0 };
+
+    const result = detectGlyphs(imageData(4, 4, alphas), settings);
+    expect(result).toHaveLength(2);
+    expect(result.every(({ groupingStatus }) => groupingStatus === "ambiguous")).toBe(true);
+  });
 });
 
 describe("character map", () => {

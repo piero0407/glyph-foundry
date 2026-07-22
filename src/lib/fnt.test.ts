@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { serializeFnt } from "./fnt";
+import { findDuplicateCharacters, serializeFnt } from "./fnt";
 
 describe("serializeFnt", () => {
   it("writes mapped glyphs using Unicode code points", () => {
@@ -9,5 +9,13 @@ describe("serializeFnt", () => {
     ]);
     expect(output).toContain("chars count=1");
     expect(output).toContain("char id=65 x=1 y=2 width=7 height=9");
+  });
+
+  it("rejects duplicate Unicode character records", () => {
+    const glyphs = [0, 1].map((id) => ({
+      id, char: "A", x: id * 8, y: 0, width: 8, height: 8, xoffset: 0, yoffset: 0, xadvance: 8,
+    }));
+    expect(findDuplicateCharacters(glyphs)).toEqual(["A"]);
+    expect(() => serializeFnt("Font", "font.png", 32, 32, 8, glyphs)).toThrow("Duplicate BMFont characters: A");
   });
 });

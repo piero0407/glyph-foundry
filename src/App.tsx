@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   Download,
   Grid3X3,
@@ -11,9 +11,11 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { assignCharacters, createCharacterMap, detectGlyphsWithMetrics, makeGridGlyphs } from "./lib/glyphs";
-import { serializeFnt } from "./lib/fnt";
+import { findDuplicateCharacters, serializeFnt } from "./lib/fnt";
 import { layoutBitmapText } from "./lib/preview";
-import { recognizeCharacters } from "./lib/recognition";
+import { createGlyphHistory, glyphHistoryReducer } from "./lib/glyphHistory";
+import { adjustBoundedValue, evaluateArithmeticExpression, horizontalDragSteps } from "./lib/arithmetic";
+import { applyRecognitionResults, createTemplateRecognizer, type Recognizer } from "./lib/recognizer";
 import type { AtlasImage, DetectionSettings, Glyph } from "./types";
 
 const DEFAULT_CHARSET =
@@ -25,6 +27,9 @@ type NumberFieldProps = {
   min?: number;
   max?: number;
   onChange: (value: number) => void;
+  historyManaged?: boolean;
+  onInteractionStart?: () => void;
+  onInteractionEnd?: () => void;
 };
 
 type BitmapPreviewProps = {
@@ -127,16 +132,166 @@ function BitmapPreview({ atlas, glyphs, lineHeight, text, zoom, onZoomChange }: 
   );
 }
 
-function NumberField({ label, value, min, max, onChange }: NumberFieldProps) {
+function NumberField({
+  label,
+  value,
+  min,
+  max,
+  onChange,
+  historyManaged = false,
+  onInteractionStart,
+  onInteractionEnd,
+}: NumberFieldProps) {
+  const [draft, setDraft] = useState(String(value));
+  const [scrubbing, setScrubbing] = useState(false);
+  const draftRef = useRef(draft);
+  const valueRef = useRef(value);
+  const wheelEndTimerRef = useRef<number | null>(null);
+  const interactionActiveRef = useRef(false);
+  const interactionCallbacksRef = useRef({ onInteractionStart, onInteractionEnd });
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startValue: number;
+    steps: number;
+    active: boolean;
+  } | null>(null);
+
+  interactionCallbacksRef.current = { onInteractionStart, onInteractionEnd };
+
+  useEffect(() => {
+    const nextDraft = String(value);
+    valueRef.current = value;
+    draftRef.current = nextDraft;
+    setDraft(nextDraft);
+  }, [value]);
+
+  useEffect(() => () => {
+    if (wheelEndTimerRef.current !== null) window.clearTimeout(wheelEndTimerRef.current);
+    if (interactionActiveRef.current) interactionCallbacksRef.current.onInteractionEnd?.();
+  }, []);
+
+  const startInteraction = () => {
+    if (interactionActiveRef.current) return;
+    interactionActiveRef.current = true;
+    interactionCallbacksRef.current.onInteractionStart?.();
+  };
+
+  const endInteraction = () => {
+    if (!interactionActiveRef.current) return;
+    interactionActiveRef.current = false;
+    interactionCallbacksRef.current.onInteractionEnd?.();
+  };
+
+  const stepValue = (delta: number) => {
+    const parsed = evaluateArithmeticExpression(draftRef.current);
+    const current = parsed ?? valueRef.current;
+    const next = adjustBoundedValue(current, delta, min, max);
+    if (next === valueRef.current && draftRef.current === String(next)) return;
+    draftRef.current = String(next);
+    valueRef.current = next;
+    setDraft(String(next));
+    onChange(next);
+  };
+
+  const commit = (expression: string) => {
+    const result = evaluateArithmeticExpression(expression);
+    if (result === null) {
+      setDraft(String(value));
+      return;
+    }
+
+    const bounded = Math.max(min ?? -Infinity, Math.min(max ?? Infinity, result));
+    draftRef.current = String(bounded);
+    valueRef.current = bounded;
+    setDraft(String(bounded));
+    if (bounded !== value) onChange(bounded);
+  };
+
   return (
     <label className="field field--number">
       <span>{label}</span>
       <input
-        type="number"
-        value={value}
-        min={min}
-        max={max}
-        onChange={(event) => onChange(Number(event.target.value))}
+        type="text"
+        inputMode="decimal"
+        role="spinbutton"
+        aria-valuenow={value}
+        aria-valuemin={min}
+        aria-valuemax={max}
+        value={draft}
+        className={scrubbing ? "is-scrubbing" : undefined}
+        title="Enter math, scroll while focused, or drag horizontally"
+        data-glyph-history={historyManaged || undefined}
+        onChange={(event) => {
+          draftRef.current = event.target.value;
+          setDraft(event.target.value);
+        }}
+        onBlur={(event) => commit(event.currentTarget.value)}
+        onWheel={(event) => {
+          if (document.activeElement !== event.currentTarget || event.deltaY === 0) return;
+          event.preventDefault();
+          startInteraction();
+          stepValue(event.deltaY < 0 ? 1 : -1);
+          if (wheelEndTimerRef.current !== null) window.clearTimeout(wheelEndTimerRef.current);
+          wheelEndTimerRef.current = window.setTimeout(() => {
+            wheelEndTimerRef.current = null;
+            endInteraction();
+          }, 150);
+        }}
+        onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          const startValue = evaluateArithmeticExpression(draftRef.current) ?? valueRef.current;
+          dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startValue, steps: 0, active: false };
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }}
+        onPointerMove={(event) => {
+          const drag = dragRef.current;
+          if (!drag || drag.pointerId !== event.pointerId) return;
+          const steps = horizontalDragSteps(event.clientX - drag.startX);
+          if (steps === drag.steps) return;
+          event.preventDefault();
+          if (!drag.active) {
+            drag.active = true;
+            setScrubbing(true);
+            startInteraction();
+          }
+          drag.steps = steps;
+          const next = adjustBoundedValue(drag.startValue, steps, min, max);
+          const previous = valueRef.current;
+          const nextDraft = String(next);
+          draftRef.current = nextDraft;
+          valueRef.current = next;
+          setDraft(nextDraft);
+          if (next !== previous) onChange(next);
+        }}
+        onPointerUp={(event) => {
+          const drag = dragRef.current;
+          if (!drag || drag.pointerId !== event.pointerId) return;
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+          dragRef.current = null;
+          if (drag.active) {
+            setScrubbing(false);
+            endInteraction();
+          }
+        }}
+        onPointerCancel={() => {
+          const wasActive = dragRef.current?.active;
+          dragRef.current = null;
+          if (wasActive) {
+            setScrubbing(false);
+            endInteraction();
+          }
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+            event.preventDefault();
+            startInteraction();
+            stepValue(event.key === "ArrowUp" ? 1 : -1);
+            endInteraction();
+          }
+          if (event.key === "Enter") commit(event.currentTarget.value);
+          if (event.key === "Escape") setDraft(String(value));
+        }}
       />
     </label>
   );
@@ -144,8 +299,8 @@ function NumberField({ label, value, min, max, onChange }: NumberFieldProps) {
 
 function App() {
   const [atlas, setAtlas] = useState<AtlasImage | null>(null);
-  const [glyphs, setGlyphs] = useState<Glyph[]>([]);
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [glyphHistory, dispatchGlyphHistory] = useReducer(glyphHistoryReducer, undefined, () => createGlyphHistory());
+  const { glyphs, selectedId } = glyphHistory.present;
   const [zoom, setZoom] = useState(1);
   const [settings, setSettings] = useState<DetectionSettings>({
     alphaThreshold: 16,
@@ -154,8 +309,14 @@ function App() {
     advanceAdjustment: 0,
   });
   const [grid, setGrid] = useState({ width: 16, height: 16, offsetX: 0, offsetY: 0, gapX: 0, gapY: 0 });
-  const [characters, setCharacters] = useState(DEFAULT_CHARSET);
-  const [recognitionThreshold, setRecognitionThreshold] = useState(62);
+  const [candidateCharset, setCandidateCharset] = useState(DEFAULT_CHARSET);
+  const [characterMap, setCharacterMap] = useState(DEFAULT_CHARSET);
+  const [recognitionThreshold, setRecognitionThreshold] = useState(99);
+  const [recognitionState, setRecognitionState] = useState<{
+    phase: "idle" | "loading" | "running" | "error";
+    progress: number;
+    message: string;
+  }>({ phase: "idle", progress: 0, message: "" });
   const [fontName, setFontName] = useState("Pixel Font");
   const [lineHeight, setLineHeight] = useState(16);
   const [previewText, setPreviewText] = useState("The quick brown fox\n0123456789");
@@ -169,6 +330,9 @@ function App() {
   const workspaceRef = useRef<HTMLElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const atlasUrl = useRef<string | null>(null);
+  const recognizerRef = useRef<Recognizer | null>(null);
+  const recognitionControllerRef = useRef<AbortController | null>(null);
+  const recognitionRunRef = useRef(0);
   const dragRef = useRef<{
     id: number;
     mode: "move" | "resize";
@@ -178,9 +342,12 @@ function App() {
   } | null>(null);
 
   const selected = glyphs.find((glyph) => glyph.id === selectedId) ?? null;
+  const duplicateCharacters = useMemo(() => findDuplicateCharacters(glyphs), [glyphs]);
   const fntPreview = useMemo(
-    () => atlas ? serializeFnt(fontName, atlas.name, atlas.width, atlas.height, lineHeight, glyphs) : "",
-    [atlas, fontName, lineHeight, glyphs],
+    () => atlas && !duplicateCharacters.length
+      ? serializeFnt(fontName, atlas.name, atlas.width, atlas.height, lineHeight, glyphs)
+      : "",
+    [atlas, duplicateCharacters.length, fontName, lineHeight, glyphs],
   );
 
   const loadFile = useCallback((file: File) => {
@@ -188,6 +355,8 @@ function App() {
     const url = URL.createObjectURL(file);
     const image = new Image();
     image.onload = () => {
+      recognitionRunRef.current += 1;
+      recognitionControllerRef.current?.abort();
       const canvas = document.createElement("canvas");
       canvas.width = image.naturalWidth;
       canvas.height = image.naturalHeight;
@@ -199,8 +368,7 @@ function App() {
       atlasUrl.current = url;
       setAtlas({ name: file.name, width: canvas.width, height: canvas.height, image, pixels });
       setFontName(file.name.replace(/\.[^.]+$/, ""));
-      setGlyphs([]);
-      setSelectedId(null);
+      dispatchGlyphHistory({ type: "reset" });
       setLineHeight(Math.min(32, canvas.height));
     };
     image.onerror = () => URL.revokeObjectURL(url);
@@ -209,6 +377,9 @@ function App() {
 
   useEffect(() => () => {
     if (atlasUrl.current) URL.revokeObjectURL(atlasUrl.current);
+    recognitionRunRef.current += 1;
+    recognitionControllerRef.current?.abort();
+    void recognizerRef.current?.dispose();
   }, []);
 
   useEffect(() => {
@@ -223,45 +394,91 @@ function App() {
     return () => scroll.removeEventListener("wheel", handleWheel);
   }, []);
 
+  useEffect(() => {
+    const handleHistoryShortcut = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      const key = event.key.toLowerCase();
+      const isUndo = key === "z" && !event.shiftKey;
+      const isRedo = key === "y" || (key === "z" && event.shiftKey);
+      if (!isUndo && !isRedo) return;
+
+      const target = event.target as HTMLElement | null;
+      const isEditable = target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || Boolean(target?.isContentEditable);
+      if (isEditable && !target?.closest("[data-glyph-history='true']")) return;
+
+      event.preventDefault();
+      dispatchGlyphHistory({ type: isUndo ? "undo" : "redo" });
+    };
+
+    window.addEventListener("keydown", handleHistoryShortcut);
+    return () => window.removeEventListener("keydown", handleHistoryShortcut);
+  }, []);
+
   const detectShapes = () => {
     if (!atlas) return;
     const detection = detectGlyphsWithMetrics(atlas.pixels, settings);
-    const found = assignCharacters(detection.glyphs, characters);
-    setGlyphs(found);
-    setSelectedId(found[0]?.id ?? null);
+    const found = assignCharacters(detection.glyphs, characterMap);
+    dispatchGlyphHistory({ type: "replace", glyphs: found, selectedId: found[0]?.id ?? null });
     if (detection.lineHeight > 0) setLineHeight(detection.lineHeight);
   };
 
-  const recognizeSymbols = () => {
+  const recognizeSymbols = async () => {
     if (!atlas || !glyphs.length) return;
-    const found = recognizeCharacters(
-      atlas.pixels,
+    recognitionControllerRef.current?.abort();
+    const controller = new AbortController();
+    recognitionControllerRef.current = controller;
+    const runId = ++recognitionRunRef.current;
+    const request = {
+      image: atlas.pixels,
       glyphs,
-      characters,
-      settings.alphaThreshold,
-      recognitionThreshold / 100,
-    );
-    setCharacters(createCharacterMap(found));
-    setGlyphs(found);
-    setSelectedId(found[0]?.id ?? null);
+      candidateCharset,
+      alphaThreshold: settings.alphaThreshold,
+      minimumConfidence: recognitionThreshold / 100,
+    };
+    setRecognitionState({ phase: "loading", progress: 0, message: "Loading offline OCR" });
+
+    try {
+      if (!recognizerRef.current) {
+        const { createTesseractRecognizer } = await import("./lib/tesseractRecognition");
+        recognizerRef.current = createTesseractRecognizer();
+      }
+      const results = await recognizerRef.current.recognize(request, controller.signal, (progress, message) => {
+        if (runId !== recognitionRunRef.current) return;
+        setRecognitionState({ phase: "running", progress, message });
+      });
+      if (controller.signal.aborted || runId !== recognitionRunRef.current) return;
+      const found = applyRecognitionResults(glyphs, results, recognitionThreshold / 100);
+      setCharacterMap(createCharacterMap(found));
+      dispatchGlyphHistory({ type: "replace", glyphs: found, selectedId: found[0]?.id ?? null });
+      setRecognitionState({ phase: "idle", progress: 1, message: "Offline OCR complete" });
+    } catch (error) {
+      if (controller.signal.aborted || runId !== recognitionRunRef.current) return;
+      const fallback = createTemplateRecognizer();
+      const results = await fallback.recognize(request, controller.signal, () => {});
+      const found = applyRecognitionResults(glyphs, results, recognitionThreshold / 100);
+      setCharacterMap(createCharacterMap(found));
+      dispatchGlyphHistory({ type: "replace", glyphs: found, selectedId: found[0]?.id ?? null });
+      setRecognitionState({
+        phase: "error",
+        progress: 1,
+        message: `Offline OCR failed; template fallback used. ${error instanceof Error ? error.message : "Unknown error"}`,
+      });
+    }
   };
 
   const applyGrid = () => {
     if (!atlas) return;
     const found = assignCharacters(
       makeGridGlyphs(atlas.width, atlas.height, grid.width, grid.height, grid.offsetX, grid.offsetY, grid.gapX, grid.gapY),
-      characters,
+      characterMap,
     );
-    setGlyphs(found);
-    setSelectedId(found[0]?.id ?? null);
+    dispatchGlyphHistory({ type: "replace", glyphs: found, selectedId: found[0]?.id ?? null });
   };
 
   const updateGlyph = (id: number, patch: Partial<Glyph>) => {
-    setGlyphs((current) => current.map((glyph) => (glyph.id === id ? {
-      ...glyph,
-      ...patch,
-      ...(patch.char !== undefined ? { matchConfidence: undefined } : {}),
-    } : glyph)));
+    dispatchGlyphHistory({ type: "update", id, patch });
   };
 
   useEffect(() => {
@@ -286,6 +503,7 @@ function App() {
     const up = () => {
       dragRef.current = null;
       setDragging(false);
+      dispatchGlyphHistory({ type: "endTransaction" });
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up, { once: true });
@@ -360,7 +578,8 @@ function App() {
   const startDrag = (event: React.PointerEvent, glyph: Glyph, mode: "move" | "resize") => {
     event.preventDefault();
     event.stopPropagation();
-    setSelectedId(glyph.id);
+    dispatchGlyphHistory({ type: "select", selectedId: glyph.id });
+    dispatchGlyphHistory({ type: "beginTransaction" });
     dragRef.current = { id: glyph.id, mode, startX: event.clientX, startY: event.clientY, glyph };
     setDragging(true);
   };
@@ -386,6 +605,16 @@ function App() {
   };
 
   const mappedCount = glyphs.filter((glyph) => glyph.char).length;
+  const reviewGlyphs = glyphs.filter((glyph) =>
+    glyph.groupingStatus === "ambiguous"
+    || (glyph.recognitionStatus && glyph.recognitionStatus !== "matched"),
+  );
+  const selectNextReviewGlyph = () => {
+    if (!reviewGlyphs.length) return;
+    const currentIndex = reviewGlyphs.findIndex(({ id }) => id === selectedId);
+    const next = reviewGlyphs[(currentIndex + 1) % reviewGlyphs.length];
+    dispatchGlyphHistory({ type: "select", selectedId: next.id });
+  };
 
   return (
     <div className="app-shell">
@@ -396,7 +625,7 @@ function App() {
         </div>
         <div className="topbar-meta">
           {atlas ? <span>{atlas.name} · {atlas.width}×{atlas.height}px</span> : <span>NO ATLAS LOADED</span>}
-          <button className="button button--primary" disabled={!atlas || mappedCount === 0} onClick={exportFnt}>
+          <button className="button button--primary" disabled={!atlas || mappedCount === 0 || duplicateCharacters.length > 0} onClick={exportFnt}>
             <Download size={16} /> Export .fnt
           </button>
         </div>
@@ -492,7 +721,7 @@ function App() {
                 {glyphs.map((glyph) => (
                   <div
                     key={glyph.id}
-                    className={`glyph-box ${selectedId === glyph.id ? "is-selected" : ""}`}
+                    className={`glyph-box ${selectedId === glyph.id ? "is-selected" : ""} ${glyph.groupingStatus === "ambiguous" || (glyph.recognitionStatus && glyph.recognitionStatus !== "matched") ? "needs-review" : ""}`}
                     style={{ left: glyph.x * zoom, top: glyph.y * zoom, width: glyph.width * zoom, height: glyph.height * zoom }}
                     onPointerDown={(event) => startDrag(event, glyph, "move")}
                   >
@@ -527,13 +756,17 @@ function App() {
           <section>
             <div className="section-title"><span>03</span><h2>Character map</h2></div>
             <label className="field">
+              <span>Recognition candidates</span>
+              <textarea value={candidateCharset} onChange={(event) => setCandidateCharset(event.target.value)} rows={3} spellCheck={false} />
+            </label>
+            <label className="field">
               <span>Characters, in reading order</span>
-              <textarea value={characters} onChange={(event) => setCharacters(event.target.value)} rows={4} spellCheck={false} />
+              <textarea value={characterMap} onChange={(event) => setCharacterMap(event.target.value)} rows={4} spellCheck={false} />
             </label>
             <NumberField label="Confidence ≥ %" value={recognitionThreshold} min={0} max={100} onChange={(value) => setRecognitionThreshold(Math.max(0, Math.min(100, value)))} />
-            <button className="button button--wide" disabled={!atlas || !glyphs.length} onClick={recognizeSymbols}><ScanLine size={16} /> Recognize symbols</button>
-            <p className="muted detection-note">Rewrites map from existing boxes. Replace each � by hand, then apply mapping.</p>
-            <button className="button button--wide" disabled={!glyphs.length} onClick={() => setGlyphs(assignCharacters(glyphs, characters))}>Apply mapping</button>
+            <button className="button button--wide" disabled={!atlas || !glyphs.length || recognitionState.phase === "loading" || recognitionState.phase === "running"} onClick={() => void recognizeSymbols()}><ScanLine size={16} /> {recognitionState.phase === "loading" || recognitionState.phase === "running" ? `${Math.round(recognitionState.progress * 100)}%` : "Recognize symbols"}</button>
+            <p className={`muted detection-note ${recognitionState.phase === "error" ? "is-error" : ""}`}>{recognitionState.message || "Offline OCR. Existing manual character edits stay untouched."}</p>
+            <button className="button button--wide" disabled={!glyphs.length} onClick={() => dispatchGlyphHistory({ type: "replace", glyphs: assignCharacters(glyphs, characterMap) })}>Apply mapping</button>
           </section>
 
           <section className="glyph-editor">
@@ -541,18 +774,20 @@ function App() {
             {selected ? (
               <>
                 <div className="glyph-heading">
-                  <div className="char-input-wrap"><input aria-label="Glyph character" maxLength={2} value={selected.char} onChange={(e) => updateGlyph(selected.id, { char: Array.from(e.target.value)[0] ?? "" })} /></div>
-                  <div><strong>{selected.char ? `U+${selected.char.codePointAt(0)?.toString(16).toUpperCase().padStart(4, "0")}` : "UNMAPPED"}</strong><small>Glyph #{selected.id + 1}{selected.matchConfidence !== undefined ? ` · AUTO ${Math.round(selected.matchConfidence * 100)}%` : ""}</small></div>
-                  <button className="icon-button danger" aria-label="Delete selected glyph" onClick={() => { setGlyphs((current) => current.filter((glyph) => glyph.id !== selected.id)); setSelectedId(null); }}><Trash2 size={17} /></button>
+                  <div className="char-input-wrap"><input aria-label="Glyph character" data-glyph-history="true" maxLength={2} value={selected.char} onChange={(e) => updateGlyph(selected.id, { char: Array.from(e.target.value)[0] ?? "" })} /></div>
+                  <div><strong>{selected.char ? `U+${selected.char.codePointAt(0)?.toString(16).toUpperCase().padStart(4, "0")}` : "UNMAPPED"}</strong><small>Glyph #{selected.id + 1}{selected.matchConfidence !== undefined ? ` · ${selected.matchProvider === "tesseract-v7" ? "OCR" : "TEMPLATE"} ${Math.round(selected.matchConfidence * 100)}%` : ""}{selected.groupingStatus === "ambiguous" ? " · GROUP REVIEW" : ""}</small></div>
+                  <button className="icon-button danger" aria-label="Delete selected glyph" onClick={() => dispatchGlyphHistory({ type: "delete", id: selected.id })}><Trash2 size={17} /></button>
                 </div>
+                {reviewGlyphs.length > 0 && <button className="button button--wide" onClick={selectNextReviewGlyph}>Next review ({reviewGlyphs.length})</button>}
+                {selected.recognitionError && <p className="muted detection-note is-error">{selected.recognitionError}</p>}
                 <div className="field-grid">
-                  <NumberField label="X" value={selected.x} min={0} max={atlas ? atlas.width - 1 : undefined} onChange={(x) => updateGlyph(selected.id, { x })} />
-                  <NumberField label="Y" value={selected.y} min={0} max={atlas ? atlas.height - 1 : undefined} onChange={(y) => updateGlyph(selected.id, { y })} />
-                  <NumberField label="Width" value={selected.width} min={1} onChange={(width) => updateGlyph(selected.id, { width })} />
-                  <NumberField label="Height" value={selected.height} min={1} onChange={(height) => updateGlyph(selected.id, { height })} />
-                  <NumberField label="X offset" value={selected.xoffset} onChange={(xoffset) => updateGlyph(selected.id, { xoffset })} />
-                  <NumberField label="Y offset" value={selected.yoffset} onChange={(yoffset) => updateGlyph(selected.id, { yoffset })} />
-                  <NumberField label="X advance" value={selected.xadvance} min={0} onChange={(xadvance) => updateGlyph(selected.id, { xadvance })} />
+                  <NumberField historyManaged label="X" value={selected.x} min={0} max={atlas ? atlas.width - 1 : undefined} onChange={(x) => updateGlyph(selected.id, { x })} onInteractionStart={() => dispatchGlyphHistory({ type: "beginTransaction" })} onInteractionEnd={() => dispatchGlyphHistory({ type: "endTransaction" })} />
+                  <NumberField historyManaged label="Y" value={selected.y} min={0} max={atlas ? atlas.height - 1 : undefined} onChange={(y) => updateGlyph(selected.id, { y })} onInteractionStart={() => dispatchGlyphHistory({ type: "beginTransaction" })} onInteractionEnd={() => dispatchGlyphHistory({ type: "endTransaction" })} />
+                  <NumberField historyManaged label="Width" value={selected.width} min={1} onChange={(width) => updateGlyph(selected.id, { width })} onInteractionStart={() => dispatchGlyphHistory({ type: "beginTransaction" })} onInteractionEnd={() => dispatchGlyphHistory({ type: "endTransaction" })} />
+                  <NumberField historyManaged label="Height" value={selected.height} min={1} onChange={(height) => updateGlyph(selected.id, { height })} onInteractionStart={() => dispatchGlyphHistory({ type: "beginTransaction" })} onInteractionEnd={() => dispatchGlyphHistory({ type: "endTransaction" })} />
+                  <NumberField historyManaged label="X offset" value={selected.xoffset} onChange={(xoffset) => updateGlyph(selected.id, { xoffset })} onInteractionStart={() => dispatchGlyphHistory({ type: "beginTransaction" })} onInteractionEnd={() => dispatchGlyphHistory({ type: "endTransaction" })} />
+                  <NumberField historyManaged label="Y offset" value={selected.yoffset} onChange={(yoffset) => updateGlyph(selected.id, { yoffset })} onInteractionStart={() => dispatchGlyphHistory({ type: "beginTransaction" })} onInteractionEnd={() => dispatchGlyphHistory({ type: "endTransaction" })} />
+                  <NumberField historyManaged label="X advance" value={selected.xadvance} min={0} onChange={(xadvance) => updateGlyph(selected.id, { xadvance })} onInteractionStart={() => dispatchGlyphHistory({ type: "beginTransaction" })} onInteractionEnd={() => dispatchGlyphHistory({ type: "endTransaction" })} />
                 </div>
               </>
             ) : <p className="muted">Select box on atlas to edit metrics.</p>}
@@ -563,7 +798,8 @@ function App() {
             <label className="field"><span>Font name</span><input value={fontName} onChange={(event) => setFontName(event.target.value)} /></label>
             <NumberField label="Line height" value={lineHeight} min={1} onChange={setLineHeight} />
             <div className="export-summary"><span>BMFont text</span><strong>{mappedCount} characters</strong><small>{atlas?.name ?? "No texture"}</small></div>
-            <button className="button button--primary button--wide" disabled={!atlas || mappedCount === 0} onClick={exportFnt}><Download size={16} /> Download .fnt</button>
+            {duplicateCharacters.length > 0 && <p className="muted detection-note is-error">Duplicate characters block export: {duplicateCharacters.join(" ")}</p>}
+            <button className="button button--primary button--wide" disabled={!atlas || mappedCount === 0 || duplicateCharacters.length > 0} onClick={exportFnt}><Download size={16} /> Download .fnt</button>
           </section>
 
         </aside>
