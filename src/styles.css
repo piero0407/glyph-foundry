@@ -94,6 +94,48 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 
 .topbar-meta { gap: 20px; }
 .topbar-meta > span { color: hsl(var(--muted)); font: 11px var(--font-mono); }
+.save-state { min-width: 48px; text-align: right; }
+.save-state--saved { color: hsl(var(--cyan)) !important; }
+.save-state--error { max-width: 260px; overflow: hidden; color: hsl(var(--danger)) !important; text-overflow: ellipsis; white-space: nowrap; }
+
+.project-overlay {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: hsl(var(--bg) / .82);
+  backdrop-filter: blur(8px);
+}
+.project-dialog {
+  width: min(680px, 100%);
+  max-height: min(760px, calc(100vh - 48px));
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid hsl(var(--line));
+  border-radius: 10px;
+  background: hsl(var(--panel));
+  box-shadow: 0 28px 80px hsl(0 0% 0% / .45);
+}
+.project-dialog-header { display: flex; align-items: center; justify-content: space-between; padding: 22px 24px 18px; border-bottom: 1px solid hsl(var(--line)); }
+.project-dialog-header h2 { margin: 3px 0 0; font-size: 22px; }
+.project-dialog-header .icon-button { font-size: 24px; }
+.eyebrow { color: hsl(var(--accent)); font: 9px var(--font-mono); letter-spacing: .14em; }
+.project-actions { display: flex; gap: 10px; padding: 16px 24px; border-bottom: 1px solid hsl(var(--line)); }
+.project-error { margin: 0; padding: 12px 24px; border-bottom: 1px solid hsl(var(--line)); color: hsl(var(--danger)); font: 11px var(--font-mono); }
+.project-list { min-height: 140px; overflow-y: auto; padding: 8px; }
+.project-empty { margin: 0; padding: 42px 16px; color: hsl(var(--muted)); text-align: center; }
+.project-row { display: flex; align-items: center; gap: 8px; border: 1px solid transparent; border-radius: 6px; }
+.project-row + .project-row { margin-top: 4px; }
+.project-row.is-active { border-color: hsl(var(--accent) / .45); background: hsl(var(--accent) / .06); }
+.project-open { min-width: 0; flex: 1; padding: 14px 12px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.project-open strong, .project-open small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-open strong { font-size: 13px; }
+.project-open small { margin-top: 4px; color: hsl(var(--muted)); font: 10px var(--font-mono); }
+.project-row-actions { display: flex; padding-right: 4px; }
+.project-row-actions .icon-button { width: 38px; height: 38px; }
 
 .workspace {
   display: grid;
@@ -364,6 +406,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 @media (max-width: 720px) {
   .topbar { height: auto; min-height: 68px; padding: 12px 16px; }
   .topbar-meta > span { display: none; }
+  .topbar-meta { gap: 8px; }
+  .topbar-meta .button { min-height: 40px; padding: 0 10px; }
+  .project-actions { flex-direction: column; }
   .workspace { display: flex; flex-direction: column; }
   .sidebar { overflow: visible; }
   .left-panel, .right-panel { display: grid; grid-template-columns: 1fr; border: 0; }

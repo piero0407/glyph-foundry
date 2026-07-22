@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
+  Copy,
   Download,
+  FolderOpen,
   Grid3X3,
   ImagePlus,
+  Pencil,
   MousePointer2,
   Plus,
   ScanLine,
@@ -12,16 +15,30 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { assignCharacters, createCharacterMap, detectGlyphsWithMetrics, makeGridGlyphs } from "./lib/glyphs";
-import { findDuplicateCharacters, serializeFnt } from "./lib/fnt";
+import { findDuplicateCharacters, parseFnt, serializeFnt } from "./lib/fnt";
 import { layoutBitmapText } from "./lib/preview";
 import { createGlyphHistory, glyphHistoryReducer } from "./lib/glyphHistory";
 import { adjustBoundedValue, evaluateArithmeticExpression, horizontalDragSteps } from "./lib/arithmetic";
 import { applyRecognitionResults, createTemplateRecognizer, type Recognizer } from "./lib/recognizer";
-import type { AtlasImage, DetectionSettings, Glyph } from "./types";
+import { decodeAtlas, isAtlasFile } from "./lib/atlas";
+import {
+  deleteProject,
+  getProject,
+  listProjects,
+  putProject,
+  summarizeProject,
+  type ProjectDocument,
+  type ProjectSummary,
+} from "./lib/projectStore";
+import type { AtlasImage, DetectionSettings, Glyph, GridSettings, PaneSizes } from "./types";
 
 const DEFAULT_CHARSET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,!?-+*/:;()[]{}<>@#$%&_=\\\"'`~|^";
 const CONFIRM_DESTRUCTIVE_SHAPE_DETECTION = true;
+const DEFAULT_SETTINGS: DetectionSettings = { alphaThreshold: 16, padding: 1, minArea: 2, advanceAdjustment: 0 };
+const DEFAULT_GRID: GridSettings = { width: 16, height: 16, offsetX: 0, offsetY: 0, gapX: 0, gapY: 0 };
+const DEFAULT_PANE_SIZES: PaneSizes = { left: 280, right: 288, preview: 220 };
+const DEFAULT_PREVIEW_TEXT = "The quick brown fox\n0123456789";
 
 type NumberFieldProps = {
   label: string;
@@ -315,16 +332,12 @@ function NumberField({
 
 function App() {
   const [atlas, setAtlas] = useState<AtlasImage | null>(null);
+  const [atlasBlob, setAtlasBlob] = useState<Blob | null>(null);
   const [glyphHistory, dispatchGlyphHistory] = useReducer(glyphHistoryReducer, undefined, () => createGlyphHistory());
   const { glyphs, selectedId } = glyphHistory.present;
   const [zoom, setZoom] = useState(1);
-  const [settings, setSettings] = useState<DetectionSettings>({
-    alphaThreshold: 16,
-    padding: 1,
-    minArea: 2,
-    advanceAdjustment: 0,
-  });
-  const [grid, setGrid] = useState({ width: 16, height: 16, offsetX: 0, offsetY: 0, gapX: 0, gapY: 0 });
+  const [settings, setSettings] = useState<DetectionSettings>(DEFAULT_SETTINGS);
+  const [grid, setGrid] = useState<GridSettings>(DEFAULT_GRID);
   const [candidateCharset, setCandidateCharset] = useState(DEFAULT_CHARSET);
   const [characterMap, setCharacterMap] = useState(DEFAULT_CHARSET);
   const [recognitionThreshold, setRecognitionThreshold] = useState(99);
@@ -335,13 +348,22 @@ function App() {
   }>({ phase: "idle", progress: 0, message: "" });
   const [fontName, setFontName] = useState("Pixel Font");
   const [lineHeight, setLineHeight] = useState(16);
-  const [previewText, setPreviewText] = useState("The quick brown fox\n0123456789");
+  const [previewText, setPreviewText] = useState(DEFAULT_PREVIEW_TEXT);
   const [previewZoom, setPreviewZoom] = useState(1);
-  const [paneSizes, setPaneSizes] = useState({ left: 280, right: 288, preview: 220 });
+  const [paneSizes, setPaneSizes] = useState<PaneSizes>(DEFAULT_PANE_SIZES);
   const [resizingPane, setResizingPane] = useState<PaneResizeMode | null>(null);
   const [pixel, setPixel] = useState<{ x: number; y: number; rgba: number[] } | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [activeProjectName, setActiveProjectName] = useState("");
+  const [activeProjectCreatedAt, setActiveProjectCreatedAt] = useState(0);
+  const [projectsOpen, setProjectsOpen] = useState(false);
+  const [storageReady, setStorageReady] = useState(false);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [storageMessage, setStorageMessage] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
+  const importInput = useRef<HTMLInputElement>(null);
   const glyphCharacterInputRef = useRef<HTMLInputElement>(null);
   const canvasScrollRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLElement>(null);
@@ -350,6 +372,8 @@ function App() {
   const recognizerRef = useRef<Recognizer | null>(null);
   const recognitionControllerRef = useRef<AbortController | null>(null);
   const recognitionRunRef = useRef(0);
+  const bootStartedRef = useRef(false);
+  const persistenceRequestedRef = useRef(false);
   const dragRef = useRef<{
     id: number;
     mode: "move" | "resize";
@@ -367,30 +391,163 @@ function App() {
     [atlas, duplicateCharacters.length, fontName, lineHeight, glyphs],
   );
 
-  const loadFile = useCallback((file: File) => {
-    if (!/image\/(png|webp)/.test(file.type) && !/\.(png|webp)$/i.test(file.name)) return;
-    const url = URL.createObjectURL(file);
-    const image = new Image();
-    image.onload = () => {
-      recognitionRunRef.current += 1;
-      recognitionControllerRef.current?.abort();
-      const canvas = document.createElement("canvas");
-      canvas.width = image.naturalWidth;
-      canvas.height = image.naturalHeight;
-      const context = canvas.getContext("2d", { willReadFrequently: true });
-      if (!context) return;
-      context.drawImage(image, 0, 0);
-      const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
-      if (atlasUrl.current) URL.revokeObjectURL(atlasUrl.current);
-      atlasUrl.current = url;
-      setAtlas({ name: file.name, width: canvas.width, height: canvas.height, image, pixels });
-      setFontName(file.name.replace(/\.[^.]+$/, ""));
-      dispatchGlyphHistory({ type: "reset" });
-      setLineHeight(Math.min(32, canvas.height));
-    };
-    image.onerror = () => URL.revokeObjectURL(url);
-    image.src = url;
+  const applyAtlas = useCallback((nextAtlas: AtlasImage, url: string, blob: Blob) => {
+    recognitionRunRef.current += 1;
+    recognitionControllerRef.current?.abort();
+    if (atlasUrl.current) URL.revokeObjectURL(atlasUrl.current);
+    atlasUrl.current = url;
+    setAtlas(nextAtlas);
+    setAtlasBlob(blob);
   }, []);
+
+  const applyProjectStateOnly = useCallback(async (project: ProjectDocument) => {
+    setActiveProjectId(project.id);
+    setActiveProjectName(project.name);
+    setActiveProjectCreatedAt(project.createdAt);
+    dispatchGlyphHistory({ type: "reset", glyphs: project.glyphs, selectedId: project.selectedId });
+    setZoom(project.zoom);
+    setSettings(project.settings);
+    setGrid(project.grid);
+    setCandidateCharset(project.candidateCharset);
+    setCharacterMap(project.characterMap);
+    setRecognitionThreshold(project.recognitionThreshold);
+    setFontName(project.fontName);
+    setLineHeight(project.lineHeight);
+    setPreviewText(project.previewText);
+    setPreviewZoom(project.previewZoom);
+    setPaneSizes(project.paneSizes);
+    setRecognitionState({ phase: "idle", progress: 0, message: "" });
+    setSaveState("saved");
+    setStorageMessage("");
+    setStorageReady(true);
+  }, []);
+
+  const applyProject = useCallback(async (project: ProjectDocument) => {
+    setStorageReady(false);
+    const decoded = await decodeAtlas(project.atlas.blob, project.atlas.name);
+    applyAtlas(decoded.atlas, decoded.url, project.atlas.blob);
+    await applyProjectStateOnly(project);
+  }, [applyAtlas, applyProjectStateOnly]);
+
+  const createProjectFromImage = useCallback(async (file: File) => {
+    if (!isAtlasFile(file)) return;
+    setStorageReady(false);
+    try {
+      const decoded = await decodeAtlas(file, file.name);
+      const now = Date.now();
+      const project: ProjectDocument = {
+        schemaVersion: 1,
+        id: crypto.randomUUID(),
+        name: file.name.replace(/\.[^.]+$/, ""),
+        createdAt: now,
+        updatedAt: now,
+        atlas: { name: file.name, type: file.type || "application/octet-stream", blob: file },
+        glyphs: [],
+        selectedId: null,
+        zoom: 1,
+        settings: { ...DEFAULT_SETTINGS },
+        grid: { ...DEFAULT_GRID },
+        candidateCharset: DEFAULT_CHARSET,
+        characterMap: DEFAULT_CHARSET,
+        recognitionThreshold: 99,
+        fontName: file.name.replace(/\.[^.]+$/, ""),
+        lineHeight: Math.min(32, decoded.atlas.height),
+        previewText: DEFAULT_PREVIEW_TEXT,
+        previewZoom: 1,
+        paneSizes: { ...DEFAULT_PANE_SIZES },
+      };
+      await putProject(project);
+      applyAtlas(decoded.atlas, decoded.url, file);
+      await applyProjectStateOnly(project);
+      setProjects((current) => [summarizeProject(project), ...current.filter(({ id }) => id !== project.id)]);
+      setProjectsOpen(false);
+    } catch (error) {
+      setStorageReady(true);
+      setStorageMessage(error instanceof Error ? error.message : "Could not create project.");
+      setSaveState("error");
+    }
+  }, [applyAtlas, applyProjectStateOnly]);
+
+  const buildCurrentProject = useCallback((): ProjectDocument | null => {
+    if (!activeProjectId || !atlas || !atlasBlob) return null;
+    return {
+      schemaVersion: 1,
+      id: activeProjectId,
+      name: activeProjectName || fontName || "Untitled project",
+      createdAt: activeProjectCreatedAt || Date.now(),
+      updatedAt: Date.now(),
+      atlas: { name: atlas.name, type: atlasBlob.type || "application/octet-stream", blob: atlasBlob },
+      glyphs,
+      selectedId,
+      zoom,
+      settings,
+      grid,
+      candidateCharset,
+      characterMap,
+      recognitionThreshold,
+      fontName,
+      lineHeight,
+      previewText,
+      previewZoom,
+      paneSizes,
+    };
+  }, [activeProjectCreatedAt, activeProjectId, activeProjectName, atlas, atlasBlob, candidateCharset, characterMap, fontName, glyphs, grid, lineHeight, paneSizes, previewText, previewZoom, recognitionThreshold, selectedId, settings, zoom]);
+
+  const saveCurrentProject = useCallback(async () => {
+    const project = buildCurrentProject();
+    if (!project) return true;
+    setSaveState("saving");
+    try {
+      await putProject(project);
+      setProjects((current) => [summarizeProject(project), ...current.filter(({ id }) => id !== project.id)]);
+      setSaveState("saved");
+      setStorageMessage("");
+      if (!persistenceRequestedRef.current && navigator.storage?.persist) {
+        persistenceRequestedRef.current = true;
+        void navigator.storage.persist();
+      }
+      return true;
+    } catch (error) {
+      setSaveState("error");
+      setStorageMessage(error instanceof Error ? error.message : "Local save failed.");
+      return false;
+    }
+  }, [buildCurrentProject]);
+
+  useEffect(() => {
+    if (bootStartedRef.current) return;
+    bootStartedRef.current = true;
+    void (async () => {
+      try {
+        const storedProjects = await listProjects();
+        setProjects(storedProjects);
+        if (storedProjects[0]) {
+          const project = await getProject(storedProjects[0].id);
+          if (project) await applyProject(project);
+        } else {
+          setStorageReady(true);
+        }
+      } catch (error) {
+        setStorageReady(true);
+        setSaveState("error");
+        setStorageMessage(error instanceof Error ? error.message : "Could not load local projects.");
+      }
+    })();
+  }, [applyProject]);
+
+  useEffect(() => {
+    if (!storageReady || !activeProjectId || !atlasBlob) return;
+    const timer = window.setTimeout(() => void saveCurrentProject(), 500);
+    return () => window.clearTimeout(timer);
+  }, [activeProjectId, atlasBlob, saveCurrentProject, storageReady]);
+
+  useEffect(() => {
+    const checkpoint = () => {
+      if (document.visibilityState === "hidden" && storageReady) void saveCurrentProject();
+    };
+    document.addEventListener("visibilitychange", checkpoint);
+    return () => document.removeEventListener("visibilitychange", checkpoint);
+  }, [saveCurrentProject, storageReady]);
 
   useEffect(() => () => {
     if (atlasUrl.current) URL.revokeObjectURL(atlasUrl.current);
@@ -642,12 +799,190 @@ function App() {
     setPixel({ x, y, rgba: Array.from(atlas.pixels.data.slice(index, index + 4)) });
   };
 
+  const startProjectFromImage = async (file: File) => {
+    if (storageReady && activeProjectId) {
+      const saved = await saveCurrentProject();
+      if (!saved && !window.confirm("Latest changes could not be saved. Create a new project anyway?")) return;
+    }
+    await createProjectFromImage(file);
+  };
+
+  const importFntAndAtlas = async (files: File[]) => {
+    const fntFile = files.find((file) => /\.fnt$/i.test(file.name));
+    const imageFile = files.find(isAtlasFile);
+    if (!fntFile || !imageFile) {
+      setStorageMessage("Choose one .fnt file and one PNG or WebP atlas.");
+      setSaveState("error");
+      return;
+    }
+    if (storageReady && activeProjectId) {
+      const saved = await saveCurrentProject();
+      if (!saved && !window.confirm("Latest changes could not be saved. Import a new project anyway?")) return;
+    }
+    setStorageReady(false);
+    try {
+      const parsed = parseFnt(await fntFile.text());
+      const expectedImageName = parsed.imageName.split(/[\\/]/).pop()?.toLowerCase();
+      if (expectedImageName !== imageFile.name.toLowerCase()) {
+        throw new Error(`BMFont expects ${parsed.imageName}, but ${imageFile.name} was selected.`);
+      }
+      const decoded = await decodeAtlas(imageFile, imageFile.name);
+      if (decoded.atlas.width !== parsed.imageWidth || decoded.atlas.height !== parsed.imageHeight) {
+        URL.revokeObjectURL(decoded.url);
+        throw new Error(`Atlas is ${decoded.atlas.width}×${decoded.atlas.height}; BMFont expects ${parsed.imageWidth}×${parsed.imageHeight}.`);
+      }
+      const invalidGlyph = parsed.glyphs.find((glyph) => glyph.x + glyph.width > decoded.atlas.width || glyph.y + glyph.height > decoded.atlas.height);
+      if (invalidGlyph) {
+        URL.revokeObjectURL(decoded.url);
+        throw new Error(`Character ${invalidGlyph.char} extends outside the atlas.`);
+      }
+      const now = Date.now();
+      const project: ProjectDocument = {
+        schemaVersion: 1,
+        id: crypto.randomUUID(),
+        name: parsed.fontName,
+        createdAt: now,
+        updatedAt: now,
+        atlas: { name: imageFile.name, type: imageFile.type || "application/octet-stream", blob: imageFile },
+        glyphs: parsed.glyphs,
+        selectedId: parsed.glyphs[0]?.id ?? null,
+        zoom: 1,
+        settings: { ...DEFAULT_SETTINGS },
+        grid: { ...DEFAULT_GRID },
+        candidateCharset: DEFAULT_CHARSET,
+        characterMap: createCharacterMap(parsed.glyphs),
+        recognitionThreshold: 99,
+        fontName: parsed.fontName,
+        lineHeight: parsed.lineHeight,
+        previewText: DEFAULT_PREVIEW_TEXT,
+        previewZoom: 1,
+        paneSizes: { ...DEFAULT_PANE_SIZES },
+      };
+      await putProject(project);
+      applyAtlas(decoded.atlas, decoded.url, imageFile);
+      await applyProjectStateOnly(project);
+      setProjects((current) => [summarizeProject(project), ...current.filter(({ id }) => id !== project.id)]);
+      setProjectsOpen(false);
+    } catch (error) {
+      setStorageReady(true);
+      setStorageMessage(error instanceof Error ? error.message : "Could not import BMFont project.");
+      setSaveState("error");
+    }
+  };
+
+  const openStoredProject = async (id: string) => {
+    if (id === activeProjectId) {
+      setProjectsOpen(false);
+      return;
+    }
+    try {
+      if (storageReady && activeProjectId) {
+        const saved = await saveCurrentProject();
+        if (!saved && !window.confirm("Latest changes could not be saved. Switch projects anyway?")) return;
+      }
+      const project = await getProject(id);
+      if (!project) throw new Error("Project no longer exists.");
+      await applyProject(project);
+      setProjectsOpen(false);
+    } catch (error) {
+      setStorageReady(true);
+      setSaveState("error");
+      setStorageMessage(error instanceof Error ? error.message : "Could not open project.");
+    }
+  };
+
+  const renameStoredProject = async (summary: ProjectSummary) => {
+    const name = window.prompt("Project name", summary.name)?.trim();
+    if (!name || name === summary.name) return;
+    try {
+      const project = summary.id === activeProjectId ? buildCurrentProject() : await getProject(summary.id);
+      if (!project) throw new Error("Project no longer exists.");
+      const renamed = { ...project, name, updatedAt: Date.now() };
+      await putProject(renamed);
+      if (summary.id === activeProjectId) setActiveProjectName(name);
+      setProjects((current) => [summarizeProject(renamed), ...current.filter(({ id }) => id !== renamed.id)]);
+    } catch (error) {
+      setSaveState("error");
+      setStorageMessage(error instanceof Error ? error.message : "Could not rename project.");
+    }
+  };
+
+  const duplicateStoredProject = async (summary: ProjectSummary) => {
+    try {
+      const source = summary.id === activeProjectId ? buildCurrentProject() : await getProject(summary.id);
+      if (!source) throw new Error("Project no longer exists.");
+      const now = Date.now();
+      const copy: ProjectDocument = { ...source, id: crypto.randomUUID(), name: `${source.name} copy`, createdAt: now, updatedAt: now };
+      await putProject(copy);
+      setProjects((current) => [summarizeProject(copy), ...current]);
+      await applyProject(copy);
+      setProjectsOpen(false);
+    } catch (error) {
+      setSaveState("error");
+      setStorageMessage(error instanceof Error ? error.message : "Could not duplicate project.");
+    }
+  };
+
+  const clearWorkspace = () => {
+    if (atlasUrl.current) URL.revokeObjectURL(atlasUrl.current);
+    atlasUrl.current = null;
+    setAtlas(null);
+    setAtlasBlob(null);
+    setActiveProjectId(null);
+    setActiveProjectName("");
+    setActiveProjectCreatedAt(0);
+    dispatchGlyphHistory({ type: "reset" });
+    setZoom(1);
+    setSettings({ ...DEFAULT_SETTINGS });
+    setGrid({ ...DEFAULT_GRID });
+    setCandidateCharset(DEFAULT_CHARSET);
+    setCharacterMap(DEFAULT_CHARSET);
+    setRecognitionThreshold(99);
+    setFontName("Pixel Font");
+    setLineHeight(16);
+    setPreviewText(DEFAULT_PREVIEW_TEXT);
+    setPreviewZoom(1);
+    setPaneSizes({ ...DEFAULT_PANE_SIZES });
+    setStorageReady(true);
+    setSaveState("idle");
+  };
+
+  const removeStoredProject = async (summary: ProjectSummary) => {
+    if (!window.confirm(`Delete local project "${summary.name}"? This cannot be undone.`)) return;
+    try {
+      await deleteProject(summary.id);
+      const remaining = projects.filter(({ id }) => id !== summary.id);
+      setProjects(remaining);
+      if (summary.id === activeProjectId) {
+        setStorageReady(false);
+        if (remaining[0]) {
+          const nextProject = await getProject(remaining[0].id);
+          if (nextProject) await applyProject(nextProject);
+          else clearWorkspace();
+        } else clearWorkspace();
+      }
+    } catch (error) {
+      setSaveState("error");
+      setStorageMessage(error instanceof Error ? error.message : "Could not delete project.");
+    }
+  };
+
   const exportFnt = () => {
     if (!atlas) return;
     const url = URL.createObjectURL(new Blob([fntPreview], { type: "text/plain" }));
     const link = document.createElement("a");
     link.href = url;
     link.download = `${fontName.trim().replace(/\s+/g, "-").toLowerCase() || "font"}.fnt`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportAtlas = () => {
+    if (!atlas || !atlasBlob) return;
+    const url = URL.createObjectURL(atlasBlob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = atlas.name;
     link.click();
     URL.revokeObjectURL(url);
   };
@@ -672,12 +1007,58 @@ function App() {
           <div><strong>GLYPH FOUNDRY</strong><small>BITMAP FONT WORKBENCH</small></div>
         </div>
         <div className="topbar-meta">
-          {atlas ? <span>{atlas.name} · {atlas.width}×{atlas.height}px</span> : <span>NO ATLAS LOADED</span>}
+          <span className={`save-state save-state--${saveState}`}>{saveState === "error" ? storageMessage || "SAVE ERROR" : saveState.toUpperCase()}</span>
+          {atlas ? <span>{activeProjectName} · {atlas.name} · {atlas.width}×{atlas.height}px</span> : <span>NO PROJECT OPEN</span>}
+          <button className="button" onClick={() => setProjectsOpen(true)}><FolderOpen size={16} /> Projects</button>
           <button className="button button--primary" disabled={!atlas || mappedCount === 0 || duplicateCharacters.length > 0} onClick={exportFnt}>
             <Download size={16} /> Export .fnt
           </button>
         </div>
       </header>
+
+      <input
+        ref={importInput}
+        className="sr-only"
+        type="file"
+        multiple
+        accept=".fnt,.png,.webp,text/plain,image/png,image/webp"
+        onChange={(event) => {
+          const files = Array.from(event.target.files ?? []);
+          event.target.value = "";
+          if (files.length) void importFntAndAtlas(files);
+        }}
+      />
+
+      {projectsOpen && (
+        <div className="project-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setProjectsOpen(false); }}>
+          <section className="project-dialog" role="dialog" aria-modal="true" aria-labelledby="projects-title">
+            <div className="project-dialog-header">
+              <div><span className="eyebrow">LOCAL WORKSPACE</span><h2 id="projects-title">Projects</h2></div>
+              <button className="icon-button" aria-label="Close projects" onClick={() => setProjectsOpen(false)}>×</button>
+            </div>
+            <div className="project-actions">
+              <button className="button button--primary" onClick={() => fileInput.current?.click()}><Plus size={16} /> New from image</button>
+              <button className="button" onClick={() => importInput.current?.click()}><Upload size={16} /> Import .fnt + image</button>
+            </div>
+            {storageMessage && saveState === "error" && <p className="project-error">{storageMessage}</p>}
+            <div className="project-list">
+              {projects.length === 0 ? <p className="project-empty">No local projects yet.</p> : projects.map((project) => (
+                <article className={`project-row ${project.id === activeProjectId ? "is-active" : ""}`} key={project.id}>
+                  <button className="project-open" onClick={() => void openStoredProject(project.id)}>
+                    <strong>{project.name}</strong>
+                    <small>{project.atlasName} · {new Date(project.updatedAt).toLocaleString()}</small>
+                  </button>
+                  <div className="project-row-actions">
+                    <button className="icon-button" aria-label={`Rename ${project.name}`} title="Rename" onClick={() => void renameStoredProject(project)}><Pencil size={15} /></button>
+                    <button className="icon-button" aria-label={`Duplicate ${project.name}`} title="Duplicate" onClick={() => void duplicateStoredProject(project)}><Copy size={15} /></button>
+                    <button className="icon-button danger" aria-label={`Delete ${project.name}`} title="Delete" onClick={() => void removeStoredProject(project)}><Trash2 size={15} /></button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        </div>
+      )}
 
       <main
         ref={workspaceRef}
@@ -693,10 +1074,15 @@ function App() {
             <div className="section-title"><span>01</span><h2>Source atlas</h2></div>
             <button className="upload-card" onClick={() => fileInput.current?.click()}>
               <Upload size={22} />
-              <strong>Load PNG or WebP</strong>
-              <small>Drop file anywhere or browse</small>
+              <strong>New project from image</strong>
+              <small>PNG or WebP · saved locally</small>
             </button>
-            <input ref={fileInput} className="sr-only" type="file" accept=".png,.webp,image/png,image/webp" onChange={(e) => e.target.files?.[0] && loadFile(e.target.files[0])} />
+            <input ref={fileInput} className="sr-only" type="file" accept=".png,.webp,image/png,image/webp" onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (file) void startProjectFromImage(file);
+            }} />
+            <button className="button button--wide" onClick={() => importInput.current?.click()}><Upload size={16} /> Import .fnt + image</button>
           </section>
 
           <section>
@@ -740,7 +1126,12 @@ function App() {
         <section
           className={`canvas-panel ${dragging ? "is-dragging" : ""}`}
           onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => { event.preventDefault(); const file = event.dataTransfer.files[0]; if (file) loadFile(file); }}
+          onDrop={(event) => {
+            event.preventDefault();
+            const files = Array.from(event.dataTransfer.files);
+            if (files.some((file) => /\.fnt$/i.test(file.name))) void importFntAndAtlas(files);
+            else if (files[0]) void startProjectFromImage(files[0]);
+          }}
         >
           <div className="canvas-toolbar">
             <div className="tool-status"><MousePointer2 size={15} /> Drag boxes · resize from corner</div>
@@ -851,6 +1242,7 @@ function App() {
             <div className="export-summary"><span>BMFont text</span><strong>{mappedCount} characters</strong><small>{atlas?.name ?? "No texture"}</small></div>
             {duplicateCharacters.length > 0 && <p className="muted detection-note is-error">Duplicate characters block export: {duplicateCharacters.join(" ")}</p>}
             <button className="button button--primary button--wide" disabled={!atlas || mappedCount === 0 || duplicateCharacters.length > 0} onClick={exportFnt}><Download size={16} /> Download .fnt</button>
+            <button className="button button--wide" disabled={!atlasBlob} onClick={exportAtlas}><Download size={16} /> Download atlas</button>
           </section>
 
         </aside>

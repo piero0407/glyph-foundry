@@ -30,3 +30,18 @@ export type DetectionSettings = {
   minArea: number;
   advanceAdjustment: number;
 };
+
+export type GridSettings = {
+  width: number;
+  height: number;
+  offsetX: number;
+  offsetY: number;
+  gapX: number;
+  gapY: number;
+};
+
+export type PaneSizes = {
+  left: number;
+  right: number;
+  preview: number;
+};
