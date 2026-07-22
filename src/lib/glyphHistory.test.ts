@@ -16,6 +16,18 @@ const glyph = (patch: Partial<Glyph> = {}): Glyph => ({
 });
 
 describe("glyph history", () => {
+  it("adds, selects, and undoes a glyph", () => {
+    let history = createGlyphHistory([glyph()], 0);
+    history = glyphHistoryReducer(history, { type: "add", glyph: glyph({ id: 1, char: "" }) });
+
+    expect(history.present.glyphs).toHaveLength(2);
+    expect(history.present.selectedId).toBe(1);
+
+    history = glyphHistoryReducer(history, { type: "undo" });
+    expect(history.present.glyphs).toHaveLength(1);
+    expect(history.present.selectedId).toBe(0);
+  });
+
   it("undoes and redoes one property edit", () => {
     let history = createGlyphHistory([glyph()], 0);
     history = glyphHistoryReducer(history, { type: "update", id: 0, patch: { width: 8 } });

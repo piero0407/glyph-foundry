@@ -15,6 +15,7 @@ export type GlyphHistory = {
 export type GlyphHistoryAction =
   | { type: "reset"; glyphs?: Glyph[]; selectedId?: number | null }
   | { type: "replace"; glyphs: Glyph[]; selectedId?: number | null }
+  | { type: "add"; glyph: Glyph }
   | { type: "select"; selectedId: number | null }
   | { type: "update"; id: number; patch: Partial<Glyph> }
   | { type: "delete"; id: number }
@@ -54,6 +55,11 @@ export function glyphHistoryReducer(history: GlyphHistory, action: GlyphHistoryA
       return commit(history, {
         glyphs: action.glyphs,
         selectedId: action.selectedId === undefined ? history.present.selectedId : action.selectedId,
+      });
+    case "add":
+      return commit(history, {
+        glyphs: [...history.present.glyphs, action.glyph],
+        selectedId: action.glyph.id,
       });
     case "select":
       return { ...history, present: { ...history.present, selectedId: action.selectedId } };

@@ -4,6 +4,7 @@ import {
   Grid3X3,
   ImagePlus,
   MousePointer2,
+  Plus,
   ScanLine,
   Trash2,
   Upload,
@@ -20,6 +21,7 @@ import type { AtlasImage, DetectionSettings, Glyph } from "./types";
 
 const DEFAULT_CHARSET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,!?-+*/:;()[]{}<>@#$%&_=\\\"'`~|^";
+const CONFIRM_DESTRUCTIVE_SHAPE_DETECTION = true;
 
 type NumberFieldProps = {
   label: string;
@@ -194,6 +196,12 @@ function NumberField({
     onChange(next);
   };
 
+  const collapseSelection = (input: HTMLInputElement) => {
+    const caret = input.value.length;
+    input.setSelectionRange(caret, caret);
+    window.getSelection()?.removeAllRanges();
+  };
+
   const commit = (expression: string) => {
     const result = evaluateArithmeticExpression(expression);
     if (result === null) {
@@ -255,6 +263,7 @@ function NumberField({
             setScrubbing(true);
             startInteraction();
           }
+          collapseSelection(event.currentTarget);
           drag.steps = steps;
           const next = adjustBoundedValue(drag.startValue, steps, min, max);
           const previous = valueRef.current;
@@ -267,6 +276,10 @@ function NumberField({
         onPointerUp={(event) => {
           const drag = dragRef.current;
           if (!drag || drag.pointerId !== event.pointerId) return;
+          if (drag.active) {
+            event.preventDefault();
+            collapseSelection(event.currentTarget);
+          }
           if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
           dragRef.current = null;
           if (drag.active) {
@@ -281,6 +294,9 @@ function NumberField({
             setScrubbing(false);
             endInteraction();
           }
+        }}
+        onSelect={(event) => {
+          if (dragRef.current?.active) collapseSelection(event.currentTarget);
         }}
         onKeyDown={(event) => {
           if (event.key === "ArrowUp" || event.key === "ArrowDown") {
@@ -326,6 +342,7 @@ function App() {
   const [pixel, setPixel] = useState<{ x: number; y: number; rgba: number[] } | null>(null);
   const [dragging, setDragging] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const glyphCharacterInputRef = useRef<HTMLInputElement>(null);
   const canvasScrollRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -418,6 +435,9 @@ function App() {
 
   const detectShapes = () => {
     if (!atlas) return;
+    if (CONFIRM_DESTRUCTIVE_SHAPE_DETECTION && !window.confirm(
+      "Detecting shapes replaces every current cell and discards manual cell edits. Continue?",
+    )) return;
     const detection = detectGlyphsWithMetrics(atlas.pixels, settings);
     const found = assignCharacters(detection.glyphs, characterMap);
     dispatchGlyphHistory({ type: "replace", glyphs: found, selectedId: found[0]?.id ?? null });
@@ -479,6 +499,27 @@ function App() {
 
   const updateGlyph = (id: number, patch: Partial<Glyph>) => {
     dispatchGlyphHistory({ type: "update", id, patch });
+  };
+
+  const addCell = () => {
+    if (!atlas) return;
+    const width = Math.min(grid.width, atlas.width);
+    const height = Math.min(grid.height, atlas.height);
+    const id = glyphs.reduce((highest, glyph) => Math.max(highest, glyph.id), -1) + 1;
+    dispatchGlyphHistory({
+      type: "add",
+      glyph: {
+        id,
+        char: "",
+        x: Math.min(grid.offsetX, atlas.width - width),
+        y: Math.min(grid.offsetY, atlas.height - height),
+        width,
+        height,
+        xoffset: 0,
+        yoffset: 0,
+        xadvance: width,
+      },
+    });
   };
 
   useEffect(() => {
@@ -578,7 +619,14 @@ function App() {
   const startDrag = (event: React.PointerEvent, glyph: Glyph, mode: "move" | "resize") => {
     event.preventDefault();
     event.stopPropagation();
-    dispatchGlyphHistory({ type: "select", selectedId: glyph.id });
+    if (selectedId !== glyph.id) {
+      dispatchGlyphHistory({ type: "select", selectedId: glyph.id });
+      requestAnimationFrame(() => {
+        glyphCharacterInputRef.current?.focus();
+        glyphCharacterInputRef.current?.select();
+      });
+      return;
+    }
     dispatchGlyphHistory({ type: "beginTransaction" });
     dragRef.current = { id: glyph.id, mode, startX: event.clientX, startY: event.clientY, glyph };
     setDragging(true);
@@ -696,10 +744,13 @@ function App() {
         >
           <div className="canvas-toolbar">
             <div className="tool-status"><MousePointer2 size={15} /> Drag boxes · resize from corner</div>
-            <div className="zoom-controls">
-              <button aria-label="Zoom out" onClick={() => setZoom((value) => Math.max(1, value - 1))}><ZoomOut size={17} /></button>
-              <span>{zoom * 100}%</span>
-              <button aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(16, value + 1))}><ZoomIn size={17} /></button>
+            <div className="canvas-toolbar-actions">
+              <button className="button button--toolbar" disabled={!atlas} onClick={addCell}><Plus size={16} /> Add cell</button>
+              <div className="zoom-controls">
+                <button aria-label="Zoom out" onClick={() => setZoom((value) => Math.max(1, value - 1))}><ZoomOut size={17} /></button>
+                <span>{zoom * 100}%</span>
+                <button aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(16, value + 1))}><ZoomIn size={17} /></button>
+              </div>
             </div>
           </div>
           <div ref={canvasScrollRef} className="canvas-scroll">
@@ -774,7 +825,7 @@ function App() {
             {selected ? (
               <>
                 <div className="glyph-heading">
-                  <div className="char-input-wrap"><input aria-label="Glyph character" data-glyph-history="true" maxLength={2} value={selected.char} onChange={(e) => updateGlyph(selected.id, { char: Array.from(e.target.value)[0] ?? "" })} /></div>
+                  <div className="char-input-wrap"><input ref={glyphCharacterInputRef} aria-label="Glyph character" data-glyph-history="true" maxLength={2} value={selected.char} onChange={(e) => updateGlyph(selected.id, { char: Array.from(e.target.value)[0] ?? "" })} /></div>
                   <div><strong>{selected.char ? `U+${selected.char.codePointAt(0)?.toString(16).toUpperCase().padStart(4, "0")}` : "UNMAPPED"}</strong><small>Glyph #{selected.id + 1}{selected.matchConfidence !== undefined ? ` · ${selected.matchProvider === "tesseract-v7" ? "OCR" : "TEMPLATE"} ${Math.round(selected.matchConfidence * 100)}%` : ""}{selected.groupingStatus === "ambiguous" ? " · GROUP REVIEW" : ""}</small></div>
                   <button className="icon-button danger" aria-label="Delete selected glyph" onClick={() => dispatchGlyphHistory({ type: "delete", id: selected.id })}><Trash2 size={17} /></button>
                 </div>

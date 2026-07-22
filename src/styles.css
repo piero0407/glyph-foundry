@@ -67,7 +67,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   border-bottom: 1px solid hsl(var(--line));
 }
 
-.brand, .topbar-meta, .glyph-heading, .zoom-controls, .tool-status, .mode-label {
+.brand, .topbar-meta, .glyph-heading, .zoom-controls, .tool-status, .mode-label, .canvas-toolbar-actions {
   display: flex;
   align-items: center;
 }
@@ -200,6 +200,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 .button--wide { width: 100%; margin-top: 4px; }
 .button--primary { background: hsl(var(--accent)); border-color: hsl(var(--accent)); color: hsl(var(--accent-ink)); }
+.button--toolbar { min-height: 44px; padding: 0 10px; }
 .button:active:not(:disabled), .icon-button:active:not(:disabled) { transform: scale(.97); }
 .button:disabled { opacity: .35; cursor: not-allowed; }
 
@@ -209,6 +210,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .canvas-panel { min-width: 0; display: grid; grid-template-rows: 48px 1fr 34px; background: hsl(48 8% 5%); }
 .canvas-toolbar, .canvas-footer { display: flex; align-items: center; justify-content: space-between; padding: 0 16px; background: hsl(var(--panel)); }
 .canvas-toolbar { border-bottom: 1px solid hsl(var(--line)); }
+.canvas-toolbar-actions { gap: 8px; }
 .tool-status { gap: 8px; color: hsl(var(--muted)); font: 10px var(--font-mono); text-transform: uppercase; }
 .zoom-controls { gap: 4px; }
 .zoom-controls button, .icon-button {
@@ -271,7 +273,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   background: hsl(var(--cyan) / .08);
   cursor: move;
 }
-.glyph-box.is-selected { border: 2px solid hsl(var(--accent)); background: hsl(var(--accent) / .1); z-index: 2; }
+.glyph-box.is-selected { border-color: hsl(var(--accent)); background: hsl(var(--accent) / .1); z-index: 2; }
 .glyph-box.needs-review { border-color: hsl(var(--danger)); background: hsl(var(--danger) / .1); }
 .glyph-box.needs-review .glyph-tag { background: hsl(var(--danger)); color: white; }
 .glyph-tag { position: absolute; top: -17px; left: -1px; min-width: 16px; height: 16px; padding: 0 4px; display: grid; place-items: center; background: hsl(var(--cyan)); color: hsl(var(--accent-ink)); font: 9px var(--font-mono); pointer-events: none; }
