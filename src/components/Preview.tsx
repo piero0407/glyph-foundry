@@ -44,7 +44,9 @@ export function Preview({ atlas, glyphs, lineHeight, text, zoom, onZoomChange }:
     });
 
     for (const { glyph, x, y } of preview.placements) {
-      context.drawImage(atlas.image, glyph.x, glyph.y, glyph.width, glyph.height, x, y, glyph.width, glyph.height);
+      if (glyph.width > 0 && glyph.height > 0) {
+        context.drawImage(atlas.image, glyph.x, glyph.y, glyph.width, glyph.height, x, y, glyph.width, glyph.height);
+      }
     }
   }, [atlas, preview]);
 

@@ -110,8 +110,20 @@ export function parseFnt(source: string): ParsedFnt {
       xadvance: integer(fields, "xadvance", `char record ${index + 1}`),
       mappingSource: "manual" as const,
     };
-    if (glyph.x < 0 || glyph.y < 0 || glyph.width < 1 || glyph.height < 1) {
+    if (glyph.width < 0 || glyph.height < 0) {
       throw new Error(`char record ${index + 1} has invalid bounds.`);
+    }
+    if (glyph.x < 0) {
+      const clipped = Math.min(-glyph.x, glyph.width);
+      glyph.x = 0;
+      glyph.width -= clipped;
+      glyph.xoffset += clipped;
+    }
+    if (glyph.y < 0) {
+      const clipped = Math.min(-glyph.y, glyph.height);
+      glyph.y = 0;
+      glyph.height -= clipped;
+      glyph.yoffset += clipped;
     }
     if (fields.page !== undefined && integer(fields, "page", `char record ${index + 1}`) !== 0) {
       throw new Error(`char record ${index + 1} references an unsupported page.`);
