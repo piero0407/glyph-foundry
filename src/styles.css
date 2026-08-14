@@ -318,6 +318,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .glyph-box.is-selected { border-color: hsl(var(--accent)); background: hsl(var(--accent) / .1); z-index: 2; }
 .glyph-box.needs-review { border-color: hsl(var(--danger)); background: hsl(var(--danger) / .1); }
 .glyph-box.needs-review .glyph-tag { background: hsl(var(--danger)); color: white; }
+.glyph-offset-marker {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  border: 1px solid hsl(var(--bg));
+  border-radius: 50%;
+  background: hsl(var(--accent));
+  box-shadow: 0 0 0 1px hsl(var(--accent) / .7);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
 .glyph-tag { position: absolute; top: -17px; left: -1px; min-width: 16px; height: 16px; padding: 0 4px; display: grid; place-items: center; background: hsl(var(--cyan)); color: hsl(var(--accent-ink)); font: 9px var(--font-mono); pointer-events: none; }
 .glyph-box.is-selected .glyph-tag { background: hsl(var(--accent)); }
 .resize-handle { position: absolute; right: -6px; bottom: -6px; width: 12px; height: 12px; padding: 0; border: 2px solid hsl(var(--bg)); background: hsl(var(--accent)); cursor: nwse-resize; }

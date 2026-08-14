@@ -8,6 +8,7 @@ import {
 import { assignCharacters, createCharacterMap, detectGlyphsWithMetrics, makeGridGlyphs } from "./lib/glyphs";
 import { findDuplicateCharacters, parseFnt, serializeFnt } from "./lib/fnt";
 import { createGlyphHistory, glyphHistoryReducer } from "./lib/glyphHistory";
+import { commitActiveGlyphEditBeforeSelection } from "./lib/glyphSelection";
 import { applyRecognitionResults, createTemplateRecognizer, type Recognizer } from "./lib/recognizer";
 import { runRecognition } from "./lib/runRecognition";
 import { decodeAtlas, isAtlasFile } from "./lib/atlas";
@@ -381,7 +382,10 @@ function App() {
     event.preventDefault();
     event.stopPropagation();
     if (selectedId !== glyph.id) {
-      dispatchGlyphHistory({ type: "select", selectedId: glyph.id });
+      commitActiveGlyphEditBeforeSelection(
+        document.activeElement instanceof HTMLElement ? document.activeElement : null,
+        () => dispatchGlyphHistory({ type: "select", selectedId: glyph.id }),
+      );
       requestAnimationFrame(() => {
         glyphCharacterInputRef.current?.focus();
         glyphCharacterInputRef.current?.select();

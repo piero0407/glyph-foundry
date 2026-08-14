@@ -64,6 +64,13 @@ export function AtlasView({ atlas, glyphs, selectedId, zoom, dragging, pixel, sc
                 style={{ left: glyph.x * zoom, top: glyph.y * zoom, width: glyph.width * zoom, height: glyph.height * zoom }}
                 onPointerDown={(event) => onDrag(event, glyph, "move")}
               >
+                {selectedId === glyph.id && (
+                  <span
+                    aria-hidden="true"
+                    className="glyph-offset-marker"
+                    style={{ left: -glyph.xoffset * zoom, bottom: -glyph.yoffset * zoom }}
+                  />
+                )}
                 <span className="glyph-tag">{glyph.char || glyph.id + 1}</span>
                 <button aria-label={`Resize glyph ${glyph.char || glyph.id + 1}`} className="resize-handle" onPointerDown={(event) => onDrag(event, glyph, "resize")} />
               </div>

@@ -96,11 +96,11 @@ export function parseFnt(source: string): ParsedFnt {
     if (codePoint < 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
       throw new Error(`char record ${index + 1} has invalid Unicode id.`);
     }
-    if (seen.has(codePoint)) throw new Error(`BMFont contains duplicate character id ${codePoint}.`);
+    const duplicate = seen.has(codePoint);
     seen.add(codePoint);
     const glyph = {
       id: index,
-      char: String.fromCodePoint(codePoint),
+      char: duplicate ? "" : String.fromCodePoint(codePoint),
       x: integer(fields, "x", `char record ${index + 1}`),
       y: integer(fields, "y", `char record ${index + 1}`),
       width: integer(fields, "width", `char record ${index + 1}`),
