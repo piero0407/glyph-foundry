@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import {
   Download,
   FolderOpen,
+  HelpCircle,
+  Image as ImageIcon,
+  Layers,
+  Sparkles,
+  Type,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -34,6 +39,7 @@ import { Projects } from "./components/Projects";
 import { AtlasPanel } from "./components/AtlasPanel";
 import { AtlasView, type Pixel } from "./components/AtlasView";
 import { EditPanel } from "./components/EditPanel";
+import { ShortcutsModal } from "./components/ShortcutsModal";
 import { PANE_LIMITS, usePanes } from "./hooks/usePanes";
 import { useHistoryKeys } from "./hooks/useHistoryKeys";
 
@@ -71,6 +77,7 @@ function App() {
   const [activeProjectName, setActiveProjectName] = useState("");
   const [activeProjectCreatedAt, setActiveProjectCreatedAt] = useState(0);
   const [projectsOpen, setProjectsOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [storageReady, setStorageReady] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [storageMessage, setStorageMessage] = useState("");
@@ -108,6 +115,11 @@ function App() {
       ? serializeFnt(fontName, atlas.name, atlas.width, atlas.height, lineHeight, glyphs)
       : "",
     [atlas, duplicateCharacters.length, fontName, lineHeight, glyphs],
+  );
+
+  const atlasInfo = useMemo(
+    () => atlas ? { name: atlas.name, width: atlas.width, height: atlas.height, glyphCount: glyphs.length } : null,
+    [atlas, glyphs.length],
   );
 
   const applyAtlas = useCallback((nextAtlas: AtlasImage, url: string, blob: Blob) => {
@@ -161,6 +173,17 @@ function App() {
       setSaveState("error");
     }
   }, [applyAtlas, applyProjectStateOnly]);
+
+  const loadSampleProject = async () => {
+    try {
+      const { createSampleAtlas } = await import("./lib/sampleAtlas");
+      const sample = await createSampleAtlas();
+      await startProjectFromImage(sample.file);
+    } catch (error) {
+      setStorageMessage(error instanceof Error ? error.message : "Could not load sample font.");
+      setSaveState("error");
+    }
+  };
 
   const buildCurrentProject = useCallback((): ProjectDocument | null => {
     if (!activeProjectId || !atlas || !atlasBlob) return null;
@@ -574,21 +597,68 @@ function App() {
 
   return (
     <div className="app-shell">
+      {/* TOPBAR */}
       <header className="topbar">
-        <div className="brand">
-          <div className="brand-mark" aria-hidden="true"><span /><span /><span /><span /></div>
-          <div><strong>GLYPH FOUNDRY</strong><small>BITMAP FONT WORKBENCH</small></div>
+        <div className="topbar-left">
+          <div className="brand">
+            <div className="brand-icon">
+              <Type size={16} />
+            </div>
+            <div className="brand-text">
+              <strong>GLYPH FOUNDRY</strong>
+              <small>Bitmap Font Studio</small>
+            </div>
+          </div>
+
+          {atlas ? (
+            <div
+              className="active-project-pill"
+              onClick={() => setProjectsOpen(true)}
+              title="Click to manage projects"
+            >
+              <span className="active-project-name">{activeProjectName || fontName}</span>
+              <span className="active-project-dim">{atlas.name} · {atlas.width}×{atlas.height}</span>
+            </div>
+          ) : (
+            <div className="badge badge--neutral">No project open</div>
+          )}
         </div>
-        <div className="topbar-meta">
-          <span className={`save-state save-state--${saveState}`}>{saveState === "error" ? storageMessage || "SAVE ERROR" : saveState.toUpperCase()}</span>
-          {atlas ? <span>{activeProjectName} · {atlas.name} · {atlas.width}×{atlas.height}px</span> : <span>NO PROJECT OPEN</span>}
-          <button className="button" onClick={() => setProjectsOpen(true)}><FolderOpen size={16} /> Projects</button>
-          <button className="button button--primary" disabled={!atlas || mappedCount === 0 || duplicateCharacters.length > 0} onClick={exportFnt}>
-            <Download size={16} /> Export .fnt
+
+        <div className="topbar-right">
+          {/* Save status */}
+          <div
+            className={`save-status-pill ${saveState === "saved" ? "is-saved" : saveState === "saving" ? "is-saving" : saveState === "error" ? "is-error" : ""}`}
+            title={storageMessage || `Status: ${saveState}`}
+          >
+            <span className="save-dot" />
+            <span>{saveState === "error" ? "Error" : saveState === "saving" ? "Saving..." : saveState === "saved" ? "Saved" : "Idle"}</span>
+          </div>
+
+          <button
+            className="icon-btn"
+            aria-label="Keyboard shortcuts"
+            title="Keyboard shortcuts (?)"
+            onClick={() => setShortcutsOpen(true)}
+          >
+            <HelpCircle size={16} />
+          </button>
+
+          <button className="btn btn--subtle" onClick={() => setProjectsOpen(true)}>
+            <FolderOpen size={15} /> Projects
+          </button>
+
+          <button
+            className="btn btn--primary"
+            disabled={!atlas || mappedCount === 0 || duplicateCharacters.length > 0}
+            onClick={exportFnt}
+            title={duplicateCharacters.length > 0 ? "Resolve duplicate characters first" : "Export BMFont .fnt file"}
+          >
+            <Download size={15} /> Export .fnt
           </button>
         </div>
       </header>
 
+      {/* Hidden file inputs */}
       <input
         ref={importInput}
         className="sr-only"
@@ -601,12 +671,19 @@ function App() {
           if (files.length) void importFntAndAtlas(files);
         }}
       />
-      <input ref={fileInput} className="sr-only" type="file" accept=".png,.webp,image/png,image/webp" onChange={(event) => {
-        const file = event.target.files?.[0];
-        event.target.value = "";
-        if (file) void startProjectFromImage(file);
-      }} />
+      <input
+        ref={fileInput}
+        className="sr-only"
+        type="file"
+        accept=".png,.webp,image/png,image/webp"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          event.target.value = "";
+          if (file) void startProjectFromImage(file);
+        }}
+      />
 
+      {/* Projects Dialog */}
       <Projects
         open={projectsOpen}
         projects={projects}
@@ -621,6 +698,13 @@ function App() {
         onDelete={(project) => void removeStoredProject(project)}
       />
 
+      {/* Shortcuts Guide Modal */}
+      <ShortcutsModal
+        open={shortcutsOpen}
+        onClose={() => setShortcutsOpen(false)}
+      />
+
+      {/* MAIN WORKSPACE */}
       <main
         ref={workspaceRef}
         className={`workspace ${panes.active ? `is-resizing-${panes.active}` : ""}`}
@@ -630,18 +714,22 @@ function App() {
           "--preview-panel-height": `${paneSizes.preview}px`,
         } as React.CSSProperties}
       >
+        {/* LEFT PANEL */}
         <AtlasPanel
           hasAtlas={Boolean(atlas)}
           settings={settings}
           grid={grid}
+          atlasInfo={atlasInfo}
           onSettings={(value) => setWork({ settings: value })}
           onGridChange={(value) => setWork({ grid: value })}
           onNew={() => fileInput.current?.click()}
           onImport={() => importInput.current?.click()}
+          onSampleAtlas={loadSampleProject}
           onDetect={detectShapes}
           onBuildGrid={applyGrid}
         />
 
+        {/* LEFT SPLITTER */}
         <div
           className="pane-splitter pane-splitter--left"
           role="separator"
@@ -655,6 +743,7 @@ function App() {
           onKeyDown={(event) => panes.onKeyDown(event, "left")}
         />
 
+        {/* CENTER VIEWPORT */}
         <AtlasView
           atlas={atlas}
           glyphs={glyphs}
@@ -674,9 +763,10 @@ function App() {
           onInspect={inspectPixel}
           onLeave={() => setPixel(null)}
           onDrag={startDrag}
+          onSampleAtlas={loadSampleProject}
         />
 
-
+        {/* RIGHT SPLITTER */}
         <div
           className="pane-splitter pane-splitter--right"
           role="separator"
@@ -690,6 +780,7 @@ function App() {
           onKeyDown={(event) => panes.onKeyDown(event, "right")}
         />
 
+        {/* RIGHT PANEL */}
         <EditPanel
           atlas={atlas}
           hasBlob={Boolean(atlasBlob)}
@@ -713,7 +804,7 @@ function App() {
           onExportAtlas={exportAtlas}
         />
 
-
+        {/* PREVIEW SPLITTER */}
         <div
           className="pane-splitter pane-splitter--preview"
           role="separator"
@@ -727,26 +818,41 @@ function App() {
           onKeyDown={(event) => panes.onKeyDown(event, "preview")}
         />
 
+        {/* LIVE PREVIEW PANEL */}
         <section className="live-preview-panel" aria-labelledby="preview-title">
           <div className="live-preview-header">
-            <div className="section-title"><span>06</span><h2 id="preview-title">Live preview</h2></div>
-            <div className="preview-header-tools">
+            <div className="section-title">
+              <Type size={14} className="text-accent" />
+              <h3 id="preview-title">Live Bitmap Preview</h3>
+            </div>
+            <div className="preview-header-meta">
               <div className="guide-legend" aria-label="Line guide legend">
                 <span className="guide-legend-item guide-legend-item--top">Line top</span>
                 <span className="guide-legend-item guide-legend-item--baseline">Baseline</span>
               </div>
-              <div className="zoom-controls preview-zoom-controls" aria-label="Preview zoom controls">
-                <button aria-label="Zoom preview out" disabled={previewZoom === 1} onClick={() => setWork({ previewZoom: Math.max(1, previewZoom - 1) })}><ZoomOut size={17} /></button>
-                <span>{previewZoom}×</span>
-                <button aria-label="Zoom preview in" disabled={previewZoom === 8} onClick={() => setWork({ previewZoom: Math.min(8, previewZoom + 1) })}><ZoomIn size={17} /></button>
-              </div>
             </div>
           </div>
+
           <label className="field preview-text-field">
-            <span>Preview text</span>
-            <textarea value={previewText} onChange={(event) => setWork({ previewText: event.target.value })} rows={2} spellCheck={false} />
+            <span>Test Text</span>
+            <textarea
+              value={previewText}
+              onChange={(event) => setWork({ previewText: event.target.value })}
+              rows={2}
+              spellCheck={false}
+              placeholder="Type preview text..."
+            />
           </label>
-          <Preview atlas={atlas} glyphs={glyphs} lineHeight={lineHeight} text={previewText} zoom={previewZoom} onZoomChange={(value) => setWork({ previewZoom: value })} />
+
+          <Preview
+            atlas={atlas}
+            glyphs={glyphs}
+            lineHeight={lineHeight}
+            text={previewText}
+            zoom={previewZoom}
+            onTextChange={(val) => setWork({ previewText: val })}
+            onZoomChange={(value) => setWork({ previewZoom: value })}
+          />
         </section>
       </main>
     </div>

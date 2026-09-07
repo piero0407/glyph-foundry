@@ -3,20 +3,26 @@ import { findDuplicateCharacters, parseFnt, serializeFnt } from "./fnt";
 
 describe("serializeFnt", () => {
   it("writes mapped glyphs using Unicode code points", () => {
-    const output = serializeFnt("Test", "atlas.png", 128, 64, 16, [
-      { id: 0, char: "A", x: 1, y: 2, width: 7, height: 9, xoffset: 0, yoffset: 1, xadvance: 8 },
-      { id: 1, char: "", x: 10, y: 2, width: 7, height: 9, xoffset: 0, yoffset: 1, xadvance: 8 },
+    const serialized = serializeFnt("Test Font", "atlas.png", 128, 64, 18, [
+      { id: 0, char: "A", x: 1, y: 2, width: 7, height: 9, xoffset: -1, yoffset: 1, xadvance: 8 },
+      { id: 1, char: "", x: 10, y: 2, width: 7, height: 9, xoffset: 0, yoffset: 0, xadvance: 8 },
     ]);
-    expect(output).toContain("chars count=1");
-    expect(output).toContain("char id=65 x=1 y=2 width=7 height=9");
+    expect(serialized).toContain('info face="Test Font"');
+    expect(serialized).toContain("common lineHeight=18 base=18 scaleW=128 scaleH=64 pages=1 packed=0");
+    expect(serialized).toContain('page id=0 file="atlas.png"');
+    expect(serialized).toContain("chars count=1");
+    expect(serialized).toContain("char id=65 x=1 y=2 width=7 height=9 xoffset=-1 yoffset=1 xadvance=8 page=0 chnl=15");
   });
 
   it("rejects duplicate Unicode character records", () => {
-    const glyphs = [0, 1].map((id) => ({
-      id, char: "A", x: id * 8, y: 0, width: 8, height: 8, xoffset: 0, yoffset: 0, xadvance: 8,
-    }));
-    expect(findDuplicateCharacters(glyphs)).toEqual(["A"]);
-    expect(() => serializeFnt("Font", "font.png", 32, 32, 8, glyphs)).toThrow("Duplicate BMFont characters: A");
+    expect(() => serializeFnt("Test Font", "atlas.png", 128, 64, 18, [
+      { id: 0, char: "A", x: 1, y: 2, width: 7, height: 9, xoffset: 0, yoffset: 0, xadvance: 8 },
+      { id: 1, char: "A", x: 10, y: 2, width: 7, height: 9, xoffset: 0, yoffset: 0, xadvance: 8 },
+    ])).toThrow("Duplicate BMFont characters: A");
+    expect(findDuplicateCharacters([
+      { id: 0, char: "A", x: 0, y: 0, width: 8, height: 8, xoffset: 0, yoffset: 0, xadvance: 8 },
+      { id: 1, char: "A", x: 8, y: 0, width: 8, height: 8, xoffset: 0, yoffset: 0, xadvance: 8 },
+    ])).toEqual(["A"]);
   });
 });
 
@@ -33,12 +39,14 @@ describe("parseFnt", () => {
     expect(parsed.glyphs[0]).toMatchObject({ char: "A", x: 1, y: 2, width: 7, height: 9, xoffset: -1, xadvance: 8 });
   });
 
-  it("rejects multi-page and duplicate-character files", () => {
+  it("rejects multi-page and handles duplicate-character files by unmapping duplicates", () => {
     const header = ['info face="Test"', "common lineHeight=8 scaleW=16 scaleH=16 pages=1", 'page id=0 file="a.png"'];
     expect(() => parseFnt(header.map((line) => line.replace("pages=1", "pages=2")).join("\n"))).toThrow("single-page");
-    expect(() => parseFnt([...header,
+    const parsed = parseFnt([...header,
       "char id=65 x=0 y=0 width=8 height=8 xoffset=0 yoffset=0 xadvance=8",
       "char id=65 x=8 y=0 width=8 height=8 xoffset=0 yoffset=0 xadvance=8",
-    ].join("\n"))).toThrow("duplicate character");
+    ].join("\n"));
+    expect(parsed.glyphs[0].char).toBe("A");
+    expect(parsed.glyphs[1].char).toBe("");
   });
 });
