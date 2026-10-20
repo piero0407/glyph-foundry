@@ -47,11 +47,14 @@ export function applyRecognitionResults(
     && result.confidence !== null
     && result.confidence >= minimumConfidence,
   );
+  const keepsMapping = (glyph: Glyph) => Boolean(glyph.char) && (glyph.mappingSource === "manual" || !byGlyph.has(glyph.id));
+  // Characters held by glyphs that keep their mapping count as taken, so OCR cannot duplicate them.
   const counts = new Map<string, number>();
+  for (const glyph of glyphs) if (keepsMapping(glyph)) counts.set(glyph.char, (counts.get(glyph.char) ?? 0) + 1);
   for (const result of accepted) counts.set(result.char!, (counts.get(result.char!) ?? 0) + 1);
 
   return glyphs.map((glyph) => {
-    if (glyph.char && glyph.mappingSource === "manual") return glyph;
+    if (keepsMapping(glyph)) return glyph;
     const result = byGlyph.get(glyph.id);
     if (!result) return glyph;
     const collision = result.char ? (counts.get(result.char) ?? 0) > 1 : false;

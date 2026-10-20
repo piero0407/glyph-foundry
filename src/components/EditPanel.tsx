@@ -202,6 +202,7 @@ export function EditPanel({
                   <div className="field-grid">
                     <NumberField
                       historyManaged
+                      integer
                       label="X"
                       value={selected.x}
                       min={0}
@@ -212,6 +213,7 @@ export function EditPanel({
                     />
                     <NumberField
                       historyManaged
+                      integer
                       label="Y"
                       value={selected.y}
                       min={0}
@@ -222,6 +224,7 @@ export function EditPanel({
                     />
                     <NumberField
                       historyManaged
+                      integer
                       label="Width"
                       value={selected.width}
                       min={1}
@@ -231,6 +234,7 @@ export function EditPanel({
                     />
                     <NumberField
                       historyManaged
+                      integer
                       label="Height"
                       value={selected.height}
                       min={1}
@@ -271,6 +275,7 @@ export function EditPanel({
                   <div className="field-grid">
                     <NumberField
                       historyManaged
+                      integer
                       label="X Offset"
                       value={selected.xoffset}
                       onChange={(xoffset) => onGlyph({ xoffset })}
@@ -279,6 +284,7 @@ export function EditPanel({
                     />
                     <NumberField
                       historyManaged
+                      integer
                       label="Y Offset"
                       value={selected.yoffset}
                       onChange={(yoffset) => onGlyph({ yoffset })}
@@ -287,6 +293,7 @@ export function EditPanel({
                     />
                     <NumberField
                       historyManaged
+                      integer
                       label="X Advance"
                       value={selected.xadvance}
                       min={0}
@@ -421,6 +428,7 @@ export function EditPanel({
             </label>
 
             <NumberField
+              integer
               label="Line Height (px)"
               value={work.lineHeight}
               min={1}

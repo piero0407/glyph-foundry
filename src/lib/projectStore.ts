@@ -97,13 +97,24 @@ export function summarizeProject(project: ProjectDocument): ProjectSummary {
   };
 }
 
+/** Summarizes stored records newest first. A damaged record is skipped so it cannot hide the others. */
+export function summarizeValidProjects(values: unknown[]): ProjectSummary[] {
+  const summaries: ProjectSummary[] = [];
+  for (const value of values) {
+    try {
+      summaries.push(summarizeProject(validateProject(value)));
+    } catch (error) {
+      console.warn("Skipping unreadable saved project.", error);
+    }
+  }
+  return summaries.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
 export async function listProjects(): Promise<ProjectSummary[]> {
   const database = await openDatabase();
   try {
     const values = await requestResult(database.transaction(PROJECT_STORE).objectStore(PROJECT_STORE).getAll());
-    return values.map((value) => {
-      return summarizeProject(validateProject(value));
-    }).sort((a, b) => b.updatedAt - a.updatedAt);
+    return summarizeValidProjects(values);
   } finally {
     database.close();
   }

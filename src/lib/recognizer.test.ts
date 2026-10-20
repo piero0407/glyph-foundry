@@ -39,6 +39,18 @@ describe("recognizer contract", () => {
     expect(mapped.every(({ recognitionStatus }) => recognitionStatus === "ambiguous")).toBe(true);
   });
 
+  it("does not reuse a character held by a preserved glyph", () => {
+    const mapped = applyRecognitionResults(
+      [glyph(0, "A", "manual"), glyph(1), glyph(2, "B", "ordered")],
+      [result(0, "C"), result(1, "A")],
+      0.9,
+    );
+    expect(mapped.map(({ char }) => char)).toEqual(["A", "", "B"]);
+    expect(mapped[1].recognitionStatus).toBe("ambiguous");
+    const unrelated = applyRecognitionResults([glyph(0, "A", "manual"), glyph(1)], [result(1, "B")], 0.9);
+    expect(unrelated.map(({ char }) => char)).toEqual(["A", "B"]);
+  });
+
   it("does not accept a score below configured threshold", () => {
     const mapped = applyRecognitionResults([glyph(0)], [result(0, "A", 0.8)], 0.9);
     expect(mapped[0]).toMatchObject({ char: "", recognitionStatus: "ambiguous", matchConfidence: 0.8 });

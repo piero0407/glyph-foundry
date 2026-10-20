@@ -6,6 +6,8 @@ type Props = {
   value: number;
   min?: number;
   max?: number;
+  /** Rounds typed values to whole numbers on commit. */
+  integer?: boolean;
   onChange: (value: number) => void;
   historyManaged?: boolean;
   onInteractionStart?: () => void;
@@ -17,6 +19,7 @@ export function NumberField({
   value,
   min,
   max,
+  integer = false,
   onChange,
   historyManaged = false,
   onInteractionStart,
@@ -25,6 +28,7 @@ export function NumberField({
   const [draft, setDraft] = useState(String(value));
   const [scrubbing, setScrubbing] = useState(false);
   const draftRef = useRef(draft);
+  const inputRef = useRef<HTMLInputElement>(null);
   const valueRef = useRef(value);
   const wheelEndTimerRef = useRef<number | null>(null);
   const interactionActiveRef = useRef(false);
@@ -73,23 +77,50 @@ export function NumberField({
     window.getSelection()?.removeAllRanges();
   };
 
+  const resetDraft = () => {
+    draftRef.current = String(value);
+    setDraft(String(value));
+  };
+
   const commit = (expression: string) => {
     const result = evaluateArithmeticExpression(expression);
     if (result === null) {
-      setDraft(String(value));
+      resetDraft();
       return;
     }
-    const bounded = Math.max(min ?? -Infinity, Math.min(max ?? Infinity, result));
+    const rounded = integer ? Math.round(result) : result;
+    const bounded = Math.max(min ?? -Infinity, Math.min(max ?? Infinity, rounded));
     draftRef.current = String(bounded);
     valueRef.current = bounded;
     setDraft(String(bounded));
     if (bounded !== value) onChange(bounded);
   };
 
+  // React registers wheel handlers as passive, so preventDefault there cannot stop the sidebar from scrolling.
+  const wheelRef = useRef<(event: WheelEvent) => void>(() => {});
+  wheelRef.current = (event) => {
+    const input = inputRef.current;
+    if (!input || document.activeElement !== input || event.deltaY === 0) return;
+    event.preventDefault();
+    startInteraction();
+    stepValue(event.deltaY < 0 ? 1 : -1);
+    if (wheelEndTimerRef.current !== null) window.clearTimeout(wheelEndTimerRef.current);
+    wheelEndTimerRef.current = window.setTimeout(() => { wheelEndTimerRef.current = null; endInteraction(); }, 150);
+  };
+
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    const handleWheel = (event: WheelEvent) => wheelRef.current(event);
+    input.addEventListener("wheel", handleWheel, { passive: false });
+    return () => input.removeEventListener("wheel", handleWheel);
+  }, []);
+
   return (
     <label className="field field--number">
       <span>{label}</span>
       <input
+        ref={inputRef}
         type="text"
         inputMode="decimal"
         role="spinbutton"
@@ -102,14 +133,6 @@ export function NumberField({
         data-glyph-history={historyManaged || undefined}
         onChange={(event) => { draftRef.current = event.target.value; setDraft(event.target.value); }}
         onBlur={(event) => commit(event.currentTarget.value)}
-        onWheel={(event) => {
-          if (document.activeElement !== event.currentTarget || event.deltaY === 0) return;
-          event.preventDefault();
-          startInteraction();
-          stepValue(event.deltaY < 0 ? 1 : -1);
-          if (wheelEndTimerRef.current !== null) window.clearTimeout(wheelEndTimerRef.current);
-          wheelEndTimerRef.current = window.setTimeout(() => { wheelEndTimerRef.current = null; endInteraction(); }, 150);
-        }}
         onPointerDown={(event) => {
           if (event.button !== 0) return;
           const startValue = evaluateArithmeticExpression(draftRef.current) ?? valueRef.current;
@@ -154,7 +177,7 @@ export function NumberField({
             endInteraction();
           }
           if (event.key === "Enter") commit(event.currentTarget.value);
-          if (event.key === "Escape") setDraft(String(value));
+          if (event.key === "Escape") resetDraft();
         }}
       />
     </label>

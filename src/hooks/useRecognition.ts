@@ -15,7 +15,8 @@ type Props = {
   candidateCharset: string;
   alphaThreshold: number;
   recognitionThreshold: number;
-  onResults: (results: GlyphRecognition[], minimumConfidence: number) => void;
+  /** Returns how many requested glyphs were edited while OCR ran and so left unchanged. */
+  onResults: (results: GlyphRecognition[], minimumConfidence: number, requested: Glyph[]) => number;
 };
 
 const IDLE_STATE: RecognitionState = { phase: "idle", progress: 0, message: "" };
@@ -32,6 +33,9 @@ export function useRecognition({
   const recognizerRef = useRef<Recognizer | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
   const runRef = useRef(0);
+  // Read at completion so results merge into the latest editor state, not the state at start.
+  const onResultsRef = useRef(onResults);
+  onResultsRef.current = onResults;
 
   useEffect(() => {
     controllerRef.current?.abort();
@@ -78,12 +82,13 @@ export function useRecognition({
       );
       if (controller.signal.aborted || runId !== runRef.current) return;
 
-      onResults(run.results, minimumConfidence);
+      const changed = onResultsRef.current(run.results, minimumConfidence, glyphs);
+      const changedNote = changed ? ` ${changed} glyph${changed === 1 ? "" : "s"} edited during OCR left unchanged.` : "";
       setState(run.fallbackUsed ? {
         phase: "error",
         progress: 1,
-        message: `Offline OCR failed; template fallback used. ${run.primaryError}`,
-      } : { phase: "idle", progress: 1, message: "Offline OCR complete" });
+        message: `Offline OCR failed; template fallback used. ${run.primaryError}${changedNote}`,
+      } : { phase: "idle", progress: 1, message: `Offline OCR complete.${changedNote}` });
     } catch (error) {
       if (controller.signal.aborted || runId !== runRef.current) return;
       setState({
@@ -92,7 +97,7 @@ export function useRecognition({
         message: error instanceof Error ? error.message : "Recognition failed",
       });
     }
-  }, [alphaThreshold, atlas, candidateCharset, glyphs, onResults, recognitionThreshold]);
+  }, [alphaThreshold, atlas, candidateCharset, glyphs, recognitionThreshold]);
 
   return { state, recognize };
 }

@@ -12,6 +12,16 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException("Recognition cancelled", "AbortError");
 }
 
+/** Waits for a shared promise but stops waiting as soon as this caller cancels. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  throwIfAborted(signal);
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(new DOMException("Recognition cancelled", "AbortError"));
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
 function glyphCanvas(imageData: ImageData, glyph: Glyph, alphaThreshold: number): HTMLCanvasElement | null {
   const mask = extractForegroundMask(imageData, glyph, alphaThreshold);
   if (!mask) return null;
@@ -50,34 +60,36 @@ class TesseractRecognizer implements Recognizer {
   private workerPromise: Promise<Worker> | null = null;
   private progressListener: (progress: number, status: string) => void = () => {};
 
-  private getWorker(signal: AbortSignal): Promise<Worker> {
+  private getWorker(): Promise<Worker> {
     if (!this.workerPromise) {
-      this.workerPromise = (async () => {
-        throwIfAborted(signal);
-        let rejectInitialization: (reason: unknown) => void = () => {};
-        const initializationFailure = new Promise<never>((_, reject) => {
-          rejectInitialization = reject;
-        });
-        const timeout = new Promise<never>((_, reject) => {
-          window.setTimeout(() => reject(new Error("Offline OCR initialization timed out")), 30_000);
-        });
-        const languageRoot = new URL(`${import.meta.env.BASE_URL}ocr/lang`, window.location.origin).href;
-        const initialization = createWorker(
-          "eng",
-          OEM.LSTM_ONLY,
-          {
-            workerPath,
-            corePath,
-            langPath: languageRoot,
-            logger: ({ progress, status }) => this.progressListener(progress, status),
-            errorHandler: (error) => rejectInitialization(error instanceof Error ? error : new Error(String(error))),
-          },
-          { load_system_dawg: "0", load_freq_dawg: "0" },
-        );
-        return Promise.race([initialization, initializationFailure, timeout]);
-      })();
-      this.workerPromise.catch(() => {
-        this.workerPromise = null;
+      let rejectInitialization: (reason: unknown) => void = () => {};
+      const initializationFailure = new Promise<never>((_, reject) => {
+        rejectInitialization = reject;
+      });
+      let timer: number | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = window.setTimeout(() => reject(new Error("Offline OCR initialization timed out")), 30_000);
+      });
+      const languageRoot = new URL(`${import.meta.env.BASE_URL}ocr/lang`, window.location.origin).href;
+      const initialization = createWorker(
+        "eng",
+        OEM.LSTM_ONLY,
+        {
+          workerPath,
+          corePath,
+          langPath: languageRoot,
+          logger: ({ progress, status }) => this.progressListener(progress, status),
+          errorHandler: (error) => rejectInitialization(error instanceof Error ? error : new Error(String(error))),
+        },
+        { load_system_dawg: "0", load_freq_dawg: "0" },
+      );
+      const workerPromise = Promise.race([initialization, initializationFailure, timeout])
+        .finally(() => window.clearTimeout(timer));
+      this.workerPromise = workerPromise;
+      workerPromise.catch(() => {
+        if (this.workerPromise === workerPromise) this.workerPromise = null;
+        // A worker that finishes starting after a timeout or error is never used, so stop it.
+        initialization.then((worker) => worker.terminate(), () => {});
       });
     }
     return this.workerPromise;
@@ -89,8 +101,7 @@ class TesseractRecognizer implements Recognizer {
     onProgress: (progress: number, status: string) => void,
   ): Promise<GlyphRecognition[]> {
     this.progressListener = (progress, status) => onProgress(progress * 0.15, status);
-    const worker = await this.getWorker(signal);
-    throwIfAborted(signal);
+    const worker = await untilAborted(this.getWorker(), signal);
     const candidates = uniqueCandidates(request.candidateCharset);
     if (!candidates.length) return [];
     await worker.setParameters({

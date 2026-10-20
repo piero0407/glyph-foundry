@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { summarizeProject, validateProject, type ProjectDocument } from "./projectStore";
+import { summarizeProject, summarizeValidProjects, validateProject, type ProjectDocument } from "./projectStore";
 
 function project(): ProjectDocument {
   return {
@@ -30,6 +30,12 @@ describe("project storage records", () => {
     const value = project();
     expect(validateProject(value)).toBe(value);
     expect(summarizeProject(value)).toEqual({ id: "project-1", name: "Test", atlasName: "atlas.png", createdAt: 10, updatedAt: 20 });
+  });
+
+  it("lists valid records newest first and skips damaged ones", () => {
+    const older = { ...project(), id: "older", updatedAt: 5 };
+    const summaries = summarizeValidProjects([older, { ...project(), schemaVersion: 2 }, project()]);
+    expect(summaries.map(({ id }) => id)).toEqual(["project-1", "older"]);
   });
 
   it("rejects unsupported and malformed records", () => {

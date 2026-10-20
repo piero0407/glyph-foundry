@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useReducer } from "react";
+import { useCallback, useMemo, useReducer, useRef } from "react";
 import { assignCharacters, createCharacterMap, detectGlyphsWithMetrics, makeGridGlyphs } from "../lib/glyphs";
 import { findDuplicateCharacters } from "../lib/fnt";
 import { createGlyphHistory, glyphHistoryReducer } from "../lib/glyphHistory";
@@ -17,6 +17,8 @@ export function useGlyphEditor() {
   useHistoryKeys(dispatchGlyphHistory);
 
   const { glyphs, selectedId } = glyphHistory.present;
+  const glyphsRef = useRef(glyphs);
+  glyphsRef.current = glyphs;
   const [work, setWork] = useReducer(patchWork, undefined, defaultWork);
   const selected = glyphs.find((glyph) => glyph.id === selectedId) ?? null;
   const duplicateCharacters = useMemo(() => findDuplicateCharacters(glyphs), [glyphs]);
@@ -107,11 +109,26 @@ export function useGlyphEditor() {
     replaceGlyphs(assignCharacters(glyphs, work.characterMap), selectedId);
   }, [glyphs, replaceGlyphs, selectedId, work.characterMap]);
 
-  const applyRecognition = useCallback((results: GlyphRecognition[], minimumConfidence: number) => {
-    const found = applyRecognitionResults(glyphs, results, minimumConfidence);
-    setWork({ characterMap: createCharacterMap(found) });
-    replaceGlyphs(found);
-  }, [glyphs, replaceGlyphs]);
+  /**
+   * Applies OCR results only to boxes unchanged since `requested` was sent, so edits made
+   * while OCR ran are kept. Returns how many requested boxes were edited or removed meanwhile.
+   */
+  const applyRecognition = useCallback((
+    results: GlyphRecognition[],
+    minimumConfidence: number,
+    requested: Glyph[],
+  ) => {
+    const current = glyphsRef.current;
+    const requestedById = new Map(requested.map((glyph) => [glyph.id, glyph]));
+    const unchanged = new Set(current.filter((glyph) => requestedById.get(glyph.id) === glyph).map(({ id }) => id));
+    const usable = results.filter((result) => unchanged.has(result.glyphId));
+    if (usable.length) {
+      const found = applyRecognitionResults(current, usable, minimumConfidence);
+      setWork({ characterMap: createCharacterMap(found) });
+      dispatchGlyphHistory({ type: "replace", glyphs: found });
+    }
+    return requested.length - unchanged.size;
+  }, []);
 
   const selectNextReviewGlyph = useCallback(() => {
     if (!reviewGlyphs.length) return;

@@ -49,10 +49,16 @@ export function useProjectSession({ current, onProjectLoaded, onWorkspaceCleared
   const bootStartedRef = useRef(false);
   const persistenceRequestedRef = useRef(false);
   const saveRevisionRef = useRef(0);
+  // Bumped by every project switch, so a slower earlier load cannot replace a newer one.
+  const projectLoadRef = useRef(0);
+  // Saves still queued for a deleted project must not write it back.
+  const deletedProjectIdsRef = useRef(new Set<string>());
   const saveQueueRef = useRef<SaveQueue<ProjectDocument> | null>(null);
 
   if (!saveQueueRef.current) {
-    saveQueueRef.current = new SaveQueue((project) => projectStore.put(project));
+    saveQueueRef.current = new SaveQueue((project) => deletedProjectIdsRef.current.has(project.id)
+      ? Promise.resolve()
+      : projectStore.put(project));
   }
 
   const reportError = useCallback((error: unknown, fallback: string, ready = true) => {
@@ -86,8 +92,20 @@ export function useProjectSession({ current, onProjectLoaded, onWorkspaceCleared
   }, [onProjectLoaded]);
 
   const applyProject = useCallback(async (project: ProjectDocument) => {
+    const load = ++projectLoadRef.current;
     setStorageReady(false);
-    const decoded = await decodeAtlas(project.atlas.blob, project.atlas.name);
+    let decoded: DecodedAtlas;
+    try {
+      decoded = await decodeAtlas(project.atlas.blob, project.atlas.name);
+    } catch (error) {
+      // The current project is still shown, so it keeps autosaving.
+      if (load === projectLoadRef.current) setStorageReady(true);
+      throw error;
+    }
+    if (load !== projectLoadRef.current) {
+      URL.revokeObjectURL(decoded.url);
+      return;
+    }
     applyAtlas(decoded, project.atlas.blob);
     applyProjectState(project);
   }, [applyAtlas, applyProjectState]);
@@ -119,6 +137,7 @@ export function useProjectSession({ current, onProjectLoaded, onWorkspaceCleared
     setSaveState("saving");
     try {
       const saved = await saveQueueRef.current!.save(project);
+      if (deletedProjectIdsRef.current.has(saved.id)) return true;
       upsertProject(saved);
       if (revision === saveRevisionRef.current) {
         setSaveState("saved");
@@ -146,6 +165,7 @@ export function useProjectSession({ current, onProjectLoaded, onWorkspaceCleared
 
   const createProjectFromImage = useCallback(async (file: File) => {
     if (!isAtlasFile(file)) return false;
+    const load = ++projectLoadRef.current;
     setStorageReady(false);
     let decoded: DecodedAtlas | null = null;
     let atlasApplied = false;
@@ -159,14 +179,18 @@ export function useProjectSession({ current, onProjectLoaded, onWorkspaceCleared
         height: decoded.atlas.height,
       });
       await projectStore.put(project);
+      upsertProject(project);
+      if (load !== projectLoadRef.current) {
+        URL.revokeObjectURL(decoded.url);
+        return false;
+      }
       applyAtlas(decoded, file);
       atlasApplied = true;
       applyProjectState(project);
-      upsertProject(project);
       return true;
     } catch (error) {
       if (decoded && !atlasApplied) URL.revokeObjectURL(decoded.url);
-      reportError(error, "Could not create project.");
+      reportError(error, "Could not create project.", load === projectLoadRef.current);
       return false;
     }
   }, [applyAtlas, applyProjectState, reportError, upsertProject]);
@@ -185,6 +209,7 @@ export function useProjectSession({ current, onProjectLoaded, onWorkspaceCleared
     }
     if (!await confirmBeforeSwitch("Latest changes could not be saved. Import a new project anyway?")) return false;
 
+    const load = ++projectLoadRef.current;
     setStorageReady(false);
     let decoded: DecodedAtlas | null = null;
     let atlasApplied = false;
@@ -211,14 +236,18 @@ export function useProjectSession({ current, onProjectLoaded, onWorkspaceCleared
         parsed,
       });
       await projectStore.put(project);
+      upsertProject(project);
+      if (load !== projectLoadRef.current) {
+        URL.revokeObjectURL(decoded.url);
+        return false;
+      }
       applyAtlas(decoded, imageFile);
       atlasApplied = true;
       applyProjectState(project);
-      upsertProject(project);
       return true;
     } catch (error) {
       if (decoded && !atlasApplied) URL.revokeObjectURL(decoded.url);
-      reportError(error, "Could not import BMFont project.");
+      reportError(error, "Could not import BMFont project.", load === projectLoadRef.current);
       return false;
     }
   }, [applyAtlas, applyProjectState, confirmBeforeSwitch, reportError, upsertProject]);
@@ -241,20 +270,31 @@ export function useProjectSession({ current, onProjectLoaded, onWorkspaceCleared
     const name = window.prompt("Project name", summary.name)?.trim();
     if (!name || name === summary.name) return false;
     try {
-      const project = summary.id === activeProjectId ? buildCurrentProject() : await projectStore.get(summary.id);
-      if (!project) throw new Error("Project no longer exists.");
-      const renamed = { ...project, name, updatedAt: Date.now() };
-      await projectStore.put(renamed);
-      if (summary.id === activeProjectId) setActiveProjectName(name);
+      let renamed: ProjectDocument;
+      if (summary.id === activeProjectId) {
+        const project = buildCurrentProject();
+        if (!project) throw new Error("Project no longer exists.");
+        setActiveProjectName(name);
+        renamed = await saveQueueRef.current!.save({ ...project, name });
+      } else {
+        renamed = await saveQueueRef.current!.run(async () => {
+          const project = await projectStore.get(summary.id);
+          if (!project) throw new Error("Project no longer exists.");
+          const next = { ...project, name, updatedAt: Date.now() };
+          await projectStore.put(next);
+          return next;
+        });
+      }
       upsertProject(renamed);
       return true;
     } catch (error) {
-      reportError(error, "Could not rename project.");
+      reportError(error, "Could not rename project.", false);
       return false;
     }
   }, [activeProjectId, buildCurrentProject, reportError, upsertProject]);
 
   const duplicateStoredProject = useCallback(async (summary: ProjectSummary) => {
+    if (!await confirmBeforeSwitch("Latest changes could not be saved. Duplicate and switch projects anyway?")) return false;
     try {
       const source = summary.id === activeProjectId ? buildCurrentProject() : await projectStore.get(summary.id);
       if (!source) throw new Error("Project no longer exists.");
@@ -271,12 +311,13 @@ export function useProjectSession({ current, onProjectLoaded, onWorkspaceCleared
       await applyProject(copy);
       return true;
     } catch (error) {
-      reportError(error, "Could not duplicate project.");
+      reportError(error, "Could not duplicate project.", false);
       return false;
     }
-  }, [activeProjectId, applyProject, buildCurrentProject, reportError, upsertProject]);
+  }, [activeProjectId, applyProject, buildCurrentProject, confirmBeforeSwitch, reportError, upsertProject]);
 
   const clearWorkspace = useCallback(() => {
+    projectLoadRef.current += 1;
     if (atlasUrlRef.current) URL.revokeObjectURL(atlasUrlRef.current);
     atlasUrlRef.current = null;
     setAtlas(null);
@@ -292,25 +333,29 @@ export function useProjectSession({ current, onProjectLoaded, onWorkspaceCleared
 
   const removeStoredProject = useCallback(async (summary: ProjectSummary) => {
     if (!window.confirm(`Delete local project "${summary.name}"? This cannot be undone.`)) return false;
+    const isActive = summary.id === activeProjectId;
+    if (isActive) setStorageReady(false);
+    deletedProjectIdsRef.current.add(summary.id);
     try {
-      await projectStore.delete(summary.id);
-      const remaining = projects.filter(({ id }) => id !== summary.id);
-      setProjects(remaining);
-      if (summary.id === activeProjectId) {
-        setStorageReady(false);
-        if (remaining[0]) {
-          const nextProject = await projectStore.get(remaining[0].id);
-          if (nextProject) await applyProject(nextProject);
-          else clearWorkspace();
-        } else {
-          clearWorkspace();
-        }
-      }
-      return true;
+      // Queued behind pending saves, so none of them can recreate the project afterwards.
+      await saveQueueRef.current!.run(() => projectStore.delete(summary.id));
     } catch (error) {
-      reportError(error, "Could not delete project.");
+      deletedProjectIdsRef.current.delete(summary.id);
+      reportError(error, "Could not delete project.", isActive);
       return false;
     }
+    const remaining = projects.filter(({ id }) => id !== summary.id);
+    setProjects((currentProjects) => currentProjects.filter(({ id }) => id !== summary.id));
+    if (!isActive) return true;
+    try {
+      const nextProject = remaining[0] ? await projectStore.get(remaining[0].id) : null;
+      if (nextProject) await applyProject(nextProject);
+      else clearWorkspace();
+    } catch (error) {
+      clearWorkspace();
+      reportError(error, "Could not open the next project.");
+    }
+    return true;
   }, [activeProjectId, applyProject, clearWorkspace, projects, reportError]);
 
   const loadSampleProject = useCallback(async () => {
